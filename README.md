@@ -61,7 +61,7 @@ with `reg delete HKCU\Software\VitureHUD /f`.
 
 **Left-click** the tray icon for the control panel. **Right-click** it for the
 quick menu: open the panel, pick a monitor to show, next monitor, stop, refresh
-monitors, start with Windows, create a desktop shortcut, exit.
+monitors, start with Windows, create a desktop shortcut, about, exit.
 
 | Key | Action |
 |---|---|
@@ -116,6 +116,8 @@ type.
 - **Follow the text cursor**, **Show a monitor when the glasses connect**,
   **Start with Windows**.
 - The bottom line shows what is on the glasses, the zoom and the frame rate.
+- **About** (top right, or in the tray menu): who made Viture HUD and why,
+  with a link to this repository. Esc closes it.
 
 The panel stays on the monitor shown on the glasses and moves with it when you
 switch.

@@ -9,6 +9,7 @@
 #include <dwmapi.h>
 #include <dwrite.h>
 #include <dwrite_1.h>
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include <cmath>
@@ -31,6 +32,10 @@ constexpr float kRightEnd = 1076;  // kWidth minus the 24 DIP margin
 constexpr float kPad = 24;
 constexpr float kRowH = 56;
 constexpr float kControlW = 300;
+
+// Shown in the About card. Keep the version in step with res/icon.rc.
+constexpr wchar_t kVersion[] = L"1.0.0";
+constexpr wchar_t kRepoUrl[] = L"https://github.com/Daeliel/viture-hud";
 
 constexpr UINT_PTR kTimerRepaint = 1;
 constexpr UINT_PTR kTimerThumbs = 2;
@@ -74,6 +79,9 @@ enum HitId {
   kHitStartup,
   kHitNext,
   kHitStop,
+  kHitAbout,        // "About" in the header
+  kHitAboutGithub,  // buttons on the About card
+  kHitAboutClose,
 };
 
 struct Hit {
@@ -113,6 +121,7 @@ IDWriteTextFormat* g_fSmall = nullptr;
 IDWriteTextFormat* g_fCaps = nullptr;
 IDWriteTextFormat* g_fBadge = nullptr;
 IDWriteTextFormat* g_fWrap = nullptr;  // small, wrapping, top-aligned
+IDWriteTextFormat* g_fWrapBody = nullptr;  // body size, wrapping, top-aligned
 
 std::map<std::wstring, Thumb> g_thumbs;
 std::vector<Hit> g_hits;
@@ -121,6 +130,7 @@ int g_hoverArg = 0;
 int g_pressId = kHitNone;
 int g_pressArg = 0;
 bool g_trackingLeave = false;
+bool g_about = false;  // the About card is open over the panel
 
 // Dragging in the lens editor.
 struct LensDrag {
@@ -214,9 +224,14 @@ bool CreateFactories() {
       g_fWrap->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
       g_fWrap->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     }
+    g_fWrapBody = MakeFormat(14, DWRITE_FONT_WEIGHT_NORMAL);
+    if (g_fWrapBody) {
+      g_fWrapBody->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+      g_fWrapBody->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    }
   }
   return g_fTitle && g_fBody && g_fStrong && g_fSmall && g_fCaps && g_fBadge &&
-         g_fWrap;
+         g_fWrap && g_fWrapBody;
 }
 
 void DrawLabel(const std::wstring& text, IDWriteTextFormat* format,
@@ -238,6 +253,26 @@ float TextWidth(const std::wstring& text, IDWriteTextFormat* format) {
   layout->GetMetrics(&m);
   layout->Release();
   return m.widthIncludingTrailingWhitespace;
+}
+
+// Draws wrapping text |width| wide with its top-left at (x, y), or only
+// measures it when |draw| is false. Returns its height.
+float DrawWrapped(const std::wstring& text, IDWriteTextFormat* format, float x,
+                  float y, float width, UINT32 color, bool draw = true) {
+  IDWriteTextLayout* layout = nullptr;
+  if (FAILED(g_dwrite->CreateTextLayout(text.c_str(), (UINT32)text.size(),
+                                        format, width, 2000, &layout))) {
+    return 0;
+  }
+  layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+  DWRITE_TEXT_METRICS m = {};
+  layout->GetMetrics(&m);
+  if (draw) {
+    g_brush->SetColor(Color(color));
+    g_rt->DrawTextLayout(D2D1::Point2F(x, y), layout, g_brush);
+  }
+  layout->Release();
+  return m.height;
 }
 
 // Upper-case section label with a little letter spacing, like "DISPLAYS".
@@ -659,6 +694,10 @@ void DrawHeader(const State& s) {
   DrawLabel(status, g_fStrong,
             Rect(pill.rect.left + 26, 24, pill.rect.right - 10, 52),
             statusColor);
+
+  D2D1_RECT_F about = Rect(pill.rect.left - 12 - 84, 24, pill.rect.left - 12, 52);
+  DrawButton(about, L"About", L"", false, true, Hovered(kHitAbout));
+  AddHit(about, kHitAbout, 0, true);
 }
 
 void DrawSectionTitle(const std::wstring& title, float y,
@@ -993,6 +1032,68 @@ void DrawLensEditor(const State& s) {
   AddHit(reset, kHitLensReset, 0, on);
 }
 
+// The About card: who made the app, why, and the one thank-you asked for.
+// Drawn over the dimmed panel; while it is open only its buttons respond.
+void DrawAbout() {
+  const std::wstring name = L"Jurica Dujmovi\u0107";
+  const std::wstring tagline =
+      L"Senior full-stack developer from Croatia, working on AI systems";
+  const std::wstring why =
+      L"I was disappointed by how little VITURE offers people who don\u2019t "
+      L"want to go down the janky cable route, or whose laptop doesn\u2019t "
+      L"have a USB-C port that also carries DisplayPort. So I built Viture "
+      L"HUD.";
+  const std::wstring ask =
+      L"It is free. The only thank-you I ask is that you contribute: report "
+      L"and fix bugs, improve the code, and see what you can make the app do "
+      L"yourself.";
+  std::wstring footer = L"Version ";
+  footer += kVersion;
+  footer += L"  \u00B7  GPL-3.0-or-later  \u00B7  Unofficial; not affiliated "
+            L"with VITURE";
+
+  const float cardW = 600, pad = 32, textW = cardW - 2 * pad;
+  const float whyH = DrawWrapped(why, g_fWrapBody, 0, 0, textW, kText, false);
+  const float askH = DrawWrapped(ask, g_fWrapBody, 0, 0, textW, kText, false);
+  const float cardH =
+      28 + 26 + 26 + 20 + 22 + whyH + 14 + askH + 26 + 40 + 20 + 18 + 26;
+  const float left = (kWidth - cardW) / 2;
+  const float top = std::fmax(kPad, (kHeight - cardH) / 2);
+  const float x = left + pad, right = left + cardW - pad;
+
+  g_brush->SetColor(Color(0x000000, 0.66f));
+  g_rt->FillRectangle(Rect(0, 0, kWidth, kHeight), g_brush);
+  D2D1_ROUNDED_RECT card = {Rect(left, top, left + cardW, top + cardH), 14, 14};
+  g_brush->SetColor(Color(kSurface));
+  g_rt->FillRoundedRectangle(card, g_brush);
+  g_brush->SetColor(Color(0xFFFFFF, 0.10f));
+  g_rt->DrawRoundedRectangle(card, g_brush, 1.0f);
+
+  float y = top + 28;
+  g_brush->SetColor(Color(kAccent));
+  g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 4, y + 7), 4, 4), g_brush);
+  DrawSpaced(L"ABOUT THE DEVELOPER", g_fCaps, x + 16, y, 1.6f, kMuted);
+  y += 26;
+  DrawLabel(name, g_fTitle, Rect(x, y, right, y + 26), kText);
+  y += 26;
+  DrawLabel(tagline, g_fBody, Rect(x, y, right, y + 20), kMuted);
+  y += 20 + 22;
+  DrawWrapped(why, g_fWrapBody, x, y, textW, kText);
+  y += whyH + 14;
+  DrawWrapped(ask, g_fWrapBody, x, y, textW, kText);
+  y += askH + 26;
+
+  D2D1_RECT_F close = Rect(right - 110, y, right, y + 40);
+  D2D1_RECT_F github = Rect(x, y, x + 240, y + 40);
+  DrawButton(github, L"Contribute on GitHub", L"", true, true,
+             Hovered(kHitAboutGithub));
+  AddHit(github, kHitAboutGithub, 0, true);
+  DrawButton(close, L"Close", L"Esc", false, true, Hovered(kHitAboutClose));
+  AddHit(close, kHitAboutClose, 0, true);
+  y += 40 + 20;
+  DrawLabel(footer, g_fSmall, Rect(x, y, right, y + 18), kDim);
+}
+
 void Paint() {
   if (!EnsureTarget()) return;
   State s = g_actions.getState();
@@ -1007,6 +1108,10 @@ void Paint() {
   DrawBehaviour(s);
   DrawActions(s);
   DrawLensEditor(s);
+  if (g_about) {
+    g_hits.clear();  // the panel underneath does not respond while it is open
+    DrawAbout();
+  }
   if (g_rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) DiscardTarget();
 }
 
@@ -1044,6 +1149,14 @@ void Activate(int id, int arg) {
     case kHitStartup: g_actions.setStartWithWindows(!s.startWithWindows); break;
     case kHitNext: g_actions.next(); break;
     case kHitStop: g_actions.stop(); break;
+    case kHitAbout: g_about = true; break;
+    case kHitAboutClose: g_about = false; break;
+    case kHitAboutGithub:
+      ShellExecuteW(g_hwnd, L"open", kRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
+      break;
+  }
+  if (id == kHitAbout || id == kHitAboutClose) {
+    g_hoverId = kHitNone;  // the hit list changes when the card opens or closes
   }
   InvalidateRect(g_hwnd, nullptr, FALSE);
 }
@@ -1213,7 +1326,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       break;
     case WM_KEYDOWN:
       if (wParam == VK_ESCAPE) {
-        Close();
+        if (g_about) {
+          g_about = false;
+          g_hoverId = kHitNone;
+          InvalidateRect(hwnd, nullptr, FALSE);
+        } else {
+          Close();
+        }
         return 0;
       }
       break;
@@ -1229,6 +1348,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       g_hoverId = kHitNone;
       g_trackingLeave = false;
       g_drag.id = kHitNone;
+      g_about = false;
       return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1291,6 +1411,14 @@ void Show(const RECT& monitorBounds) {
   SetForegroundWindow(g_hwnd);
   SetTimer(g_hwnd, kTimerRepaint, kRepaintMs, nullptr);
   SetTimer(g_hwnd, kTimerThumbs, kThumbsMs, nullptr);
+}
+
+void ShowAbout(const RECT& monitorBounds) {
+  Show(monitorBounds);
+  if (!g_hwnd) return;
+  g_about = true;
+  g_hoverId = kHitNone;
+  InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void Close() {

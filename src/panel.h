@@ -74,6 +74,8 @@ void Init(HINSTANCE instance, HICON icon, const Actions& actions);
 // the front (moving it to that monitor) if it is already open. Never pass the
 // glasses: the viewer covers that display.
 void Show(const RECT& monitorBounds);
+// Show, then open the About card (who made the app and how to contribute).
+void ShowAbout(const RECT& monitorBounds);
 void Close();
 bool IsOpen();
 

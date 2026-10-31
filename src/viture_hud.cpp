@@ -53,6 +53,7 @@
 #define MENU_AUTOSTART 1005
 #define MENU_SHORTCUT 1006
 #define MENU_OPEN 1007
+#define MENU_ABOUT 1008
 
 static const wchar_t* kAppName = L"Viture HUD";
 static const wchar_t* kClassName = L"VitureHudTrayWnd";
@@ -1127,6 +1128,7 @@ static void ShowContextMenu() {
   AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : 0),
               MENU_AUTOSTART, L"Start with Windows");
   AppendMenuW(menu, MF_STRING, MENU_SHORTCUT, L"Create Desktop shortcut");
+  AppendMenuW(menu, MF_STRING, MENU_ABOUT, L"About");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, MENU_EXIT, L"Exit");
 
@@ -1312,6 +1314,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam,
       int id = LOWORD(wParam);
       if (id == MENU_OPEN) {
         panel::Show(PanelHome());
+      } else if (id == MENU_ABOUT) {
+        panel::ShowAbout(PanelHome());
       } else if (id == MENU_CYCLE) {
         Cycle(+1, true);
       } else if (id == MENU_STOP) {

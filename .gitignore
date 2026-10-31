@@ -1,0 +1,4 @@
+# Build output (build.bat)
+/build/
+*.o
+*.exe

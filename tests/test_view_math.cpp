@@ -1,11 +1,13 @@
 // Copyright (C) 2026 Jurica Dujmovic
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Tests for the viewer geometry (src/view_math.h). build.bat runs them.
+// Tests for the viewer geometry (src/view_math.h) and glasses detection
+// (src/glasses_id.h). build.bat runs them.
 //
 // They lock in the behaviour that took a while to get right: zoom steps,
 // panning that reaches exactly the content's edges, the dead zone and easing
 // of smooth panning, and where the picture-in-picture and edge lens go.
+#include "glasses_id.h"
 #include "view_math.h"
 
 #include <cmath>
@@ -238,7 +240,29 @@ static void TestLensLayout() {
         "so it is always fully on the glasses");
 }
 
+static void TestGlassesId() {
+  printf("glasses detection\n");
+  using namespace glassesid;
+  Check(IsVitureName(L"VITURE"), "Luma Ultra: the name VITURE");
+  Check(IsVitureName(L"VITURE Beast"), "Beast: VITURE plus a model name");
+  Check(IsVitureName(L"VITURE Luma Ultra"), "a model name with spaces");
+  Check(IsVitureName(L"viture beast"), "the name is not case sensitive");
+  Check(!IsVitureName(L"VITUREX"), "a longer word is not VITURE");
+  Check(!IsVitureName(L"My VITURE"), "VITURE must come first");
+  Check(!IsVitureName(L"DELL U2720Q"), "an ordinary monitor is not glasses");
+  Check(!IsVitureName(L""), "no name is not glasses");
+  Check(IsVitureManufacturer(L"CVT"), "Luma Ultra's manufacturer id CVT");
+  Check(IsVitureManufacturer(L"VIT"), "Beast's manufacturer id VIT");
+  Check(!IsVitureManufacturer(L"GSM"), "an LG monitor's id is not glasses");
+  Check(!IsVitureManufacturer(L""), "no id is not glasses");
+  Check(IsVitureDisplay(L"VITURE Beast", L"VIT"), "the Beast as Windows reports it");
+  Check(IsVitureDisplay(L"", L"CVT"), "the id alone is enough");
+  Check(IsVitureDisplay(L"VITURE", L""), "the name alone is enough");
+  Check(!IsVitureDisplay(L"Generic PnP Monitor", L"DEL"), "a Dell is not glasses");
+}
+
 int main() {
+  TestGlassesId();
   TestLensLayout();
   TestEdgeLens();
   TestPip();

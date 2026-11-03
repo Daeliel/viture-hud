@@ -17,6 +17,7 @@
 #include <dwmapi.h>
 #include <windowsx.h>
 
+#include "glasses_id.h"
 #include "panel.h"
 #include "viewer.h"
 
@@ -235,17 +236,17 @@ static std::vector<MonitorInfo> EnumerateMonitors() {
       mfr = ReadEdidManufacturer(mon.DeviceID);
     }
 
-    // A display is the glasses if CCD says so, or EDID says CVT, or a name
-    // mentions VITURE. CCD is checked first because it is always correct.
-    // CCD also gives the real monitor name, preferred over the driver string.
-    bool byCcd = false;
+    // A display is the glasses if its CCD name is "VITURE" or "VITURE <model>",
+    // or its EDID manufacturer is one VITURE uses (see glasses_id.h). CCD also
+    // gives the real monitor name, preferred over the driver string.
+    std::wstring ccdName;
     for (const auto& t : targets) {
       if (t.deviceName != mi.deviceName) continue;
-      if (t.friendlyName == L"VITURE") byCcd = true;
+      ccdName = t.friendlyName;
       if (!t.friendlyName.empty()) monitorName = t.friendlyName;
     }
     // Never match on the adapter or driver string: those are generic.
-    mi.isViture = byCcd || (mfr == L"CVT");
+    mi.isViture = glassesid::IsVitureDisplay(ccdName, mfr);
 
     // Current geometry.
     DEVMODEW dm = {};

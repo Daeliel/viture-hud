@@ -39,9 +39,10 @@ virtual display drivers.
 - A graphics card with Direct3D 11 - any from the last decade.
 
 Tested with VITURE Luma Ultra glasses on Windows 10 22H2 with an NVIDIA GPU.
-Other VITURE models should work as long as Windows reports the display's name
-as "VITURE" (Settings > System > Display > Advanced display). If yours does
-not, please open an issue with the name it shows.
+Also reported working with the VITURE Beast. Other VITURE models should work as
+long as Windows reports the display's name as "VITURE" or "VITURE <model>"
+(Settings > System > Display > Advanced display). If yours does not, please
+open an issue with the name it shows.
 
 ## Install
 
@@ -160,7 +161,7 @@ of the glasses' width and height.
 
 | Symptom | Cause and fix |
 |---|---|
-| "Viture glasses not connected" | Windows does not see a display named VITURE. Check it appears in Settings > Display; unplug and replug the glasses. |
+| "Viture glasses not connected" | Windows does not see a display named VITURE (or VITURE plus a model name). Check it appears in Settings > Display; unplug and replug the glasses. |
 | Status bar says "(GDI)", low frame rate | Desktop Duplication is unavailable for that monitor, usually because **HDR** is on for it, or the monitor is rotated. Turn HDR off for that monitor to get full speed. |
 | Edge lens never appears over a game or Moonlight | Games and game-streaming apps capture the mouse: Windows' cursor is hidden and held in the middle, and the cursor you see is part of the picture. In Moonlight, turn on **Optimize mouse for remote desktop instead of games**. |
 | The view does not follow typing in some app | That app does not report its text cursor to Windows. The view keeps following the mouse there. |
@@ -214,7 +215,8 @@ any MinGW DLLs.
 | `src/viewer.cpp`, `viewer.h` | The view on the glasses: capture, rendering, panning, PiP, edge lens |
 | `src/panel.cpp`, `panel.h` | Control panel (Direct2D) |
 | `src/view_math.h` | All geometry, as small pure functions |
-| `tests/test_view_math.cpp` | Tests for `view_math.h` |
+| `src/glasses_id.h` | Which displays are VITURE glasses (name and EDID manufacturer) |
+| `tests/test_view_math.cpp` | Tests for `view_math.h` and `glasses_id.h` |
 | `tools/check_docs.ps1` | Checks this README against the code |
 | `res/` | Icon |
 

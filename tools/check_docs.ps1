@@ -3,9 +3,12 @@
 #
 # Checks README.md against the code, so the documentation cannot drift.
 # build.bat runs it; it fails (exit 1) and lists what is missing when:
-#   - a hotkey registered in src/viture_hud.cpp is not in the README,
+#   - a default shortcut in src/viture_hud.cpp's kHotkeys table is not in the
+#     README's key table as **Keys**, or not in the settings table as
+#     `HotkeyName` = `Keys`,
 #   - a setting read from the registry is not in the README's settings table
-#     with its default, written as `Name` = `default`,
+#     with its default, written as `Name` = `default` (`Name` = empty for
+#     text that is empty by default),
 #   - a lens limit in src/view_math.h is not in the README as "min-max%".
 #
 # Run by hand: powershell -ExecutionPolicy Bypass -File tools\check_docs.ps1
@@ -18,23 +21,31 @@ $math = Get-Content -Raw (Join-Path $root "src\view_math.h")
 $doc = Get-Content -Raw $Readme
 $problems = @()
 
-# Hotkeys: RegisterHotKey(g.hwnd, ID, MOD_ALT | MOD_SHIFT | ..., 'D')
+# Default shortcuts: {panel::kKeyNext, L"HotkeyNext", L"Alt+D", ...
 $hotkeys = [regex]::Matches($app,
-    "RegisterHotKey\(g\.hwnd,\s*\w+,\s*([A-Z_|\s]+),\s*'(.)'\)")
+    '\{panel::kKey\w+,\s*L"(\w+)",\s*L"([^"]+)"')
 foreach ($m in $hotkeys) {
-    $mods = $m.Groups[1].Value
-    $parts = @()
-    if ($mods -match "MOD_CONTROL") { $parts += "Ctrl" }
-    if ($mods -match "MOD_ALT") { $parts += "Alt" }
-    if ($mods -match "MOD_SHIFT") { $parts += "Shift" }
-    if ($mods -match "MOD_WIN") { $parts += "Win" }
-    $parts += $m.Groups[2].Value
-    $combo = $parts -join "+"
+    $name = $m.Groups[1].Value
+    $combo = $m.Groups[2].Value
     if (-not $doc.Contains("**$combo**")) {
-        $problems += "hotkey $combo is not in the README's key table"
+        $problems += "shortcut $combo is not in the README's key table"
+    }
+    if (-not $doc.Contains("``$name`` = ``$combo``")) {
+        $problems += "shortcut setting $name is not in the README as ``$name`` = ``$combo``"
     }
 }
-if ($hotkeys.Count -eq 0) { $problems += "found no hotkeys in the code (check the pattern)" }
+if ($hotkeys.Count -eq 0) { $problems += "found no shortcuts in the code (check the pattern)" }
+
+# Text settings: ReadSettingText(L"Name", L"default")
+$texts = [regex]::Matches($app, 'ReadSettingText\(L"(\w+)",\s*L"([^"]*)"\)')
+foreach ($m in $texts) {
+    $name = $m.Groups[1].Value
+    $default = $m.Groups[2].Value
+    $want = if ($default -eq "") { "``$name`` = empty" } else { "``$name`` = ``$default``" }
+    if (-not $doc.Contains($want)) {
+        $problems += "setting $name is not in the README as $want"
+    }
+}
 
 # Settings and their defaults: ReadSetting(L"Name", true) / ReadSettingNumber(L"Name", 120)
 $settings = [regex]::Matches($app,
@@ -87,5 +98,5 @@ if ($problems.Count -gt 0) {
     foreach ($p in $problems) { Write-Host "  - $p" }
     exit 1
 }
-Write-Host "[docs] README matches the code: $($hotkeys.Count) hotkeys, $($settings.Count) settings, $($ranges.Count) ranges"
+Write-Host "[docs] README matches the code: $($hotkeys.Count) shortcuts, $($settings.Count + $texts.Count) settings, $($ranges.Count) ranges"
 exit 0

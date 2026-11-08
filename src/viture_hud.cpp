@@ -18,7 +18,9 @@
 #include <windowsx.h>
 
 #include "glasses_id.h"
+#include "hotkeys.h"
 #include "panel.h"
+#include "privacy.h"
 #include "viewer.h"
 
 #include <cmath>
@@ -30,13 +32,8 @@
 // Constants
 // ---------------------------------------------------------------------------
 #define ID_TRAY 1
-#define HOTKEY_CYCLE 1
-#define HOTKEY_PREV 2
-#define HOTKEY_STOP 3
-#define HOTKEY_ZOOM_NEXT 5
-#define HOTKEY_ZOOM_PREV 6
-#define HOTKEY_LOCK 7
-#define HOTKEY_PIP 8
+// Hotkey ids are panel::Key + 1. This one only checks whether keys are free.
+#define HOTKEY_PROBE 99
 
 #define TIMER_TOAST 2
 #define TIMER_RESCAN 3
@@ -55,6 +52,9 @@
 #define MENU_SHORTCUT 1006
 #define MENU_OPEN 1007
 #define MENU_ABOUT 1008
+#define MENU_PRIVACY 1009
+#define MENU_SHORTCUTS 1010
+#define MENU_PRIVACY_SETTINGS 1011
 
 static const wchar_t* kAppName = L"Viture HUD";
 static const wchar_t* kClassName = L"VitureHudTrayWnd";
@@ -95,9 +95,29 @@ struct AppState {
   bool pipOn = false;
   int lensStep = 1;  // edge lens: index into kLensZooms
   viewmath::LensLayout lensLayout;  // its size and where it appears
+
+  // Privacy mode settings.
+  int privacyScreens = 0;  // 0 main screen, 1 all screens
+  int privacyMethod = 0;   // 0 switch off when a stand-in is set, 1 cover
+  bool privacyDim = true;
+  std::wstring privacyStandIn;
+
+  // Looked up with the monitors, not on every panel repaint.
+  bool hasBuiltIn = false;
+  std::vector<privacy::StandIn> standIns;
 };
 
 static AppState g;
+
+// The keys of a shortcut as shown to people, e.g. "Alt+D". Empty when the
+// shortcut is not set. (Defined with the hotkeys, below.)
+static std::wstring KeyLabel(panel::Key key);
+
+// "   •   Alt+D next" for toasts, or nothing when the shortcut is not set.
+static std::wstring KeyHint(panel::Key key, const std::wstring& what) {
+  std::wstring keys = KeyLabel(key);
+  return keys.empty() ? L"" : L"   •   " + keys + L" " + what;
+}
 
 // Overlay window used for the on-glasses toast.
 static HWND g_toast = nullptr;
@@ -406,9 +426,17 @@ static void ShowBalloon(const std::wstring& title, const std::wstring& text) {
 
 static void RefreshMonitors() {
   g.monitors = EnumerateMonitors();
+  g.hasBuiltIn = privacy::HasBuiltInScreen();
+  g.standIns = privacy::FindStandIns();
   // If the glasses vanished, nothing can be shown on them: close the viewer
   // rather than leave it painting onto a display that no longer exists.
   if (!FindGlasses()) {
+    // Without the glasses the work would be nowhere to see: screens back on.
+    if (privacy::Current() != privacy::Mode::kOff) {
+      privacy::Stop();
+      ShowBalloon(kAppName,
+                  L"Privacy mode is off: the glasses were disconnected.");
+    }
     if (viewer::IsRunning()) viewer::Stop();
     g.currentSource = -1;
   }
@@ -542,7 +570,7 @@ static void ShowSource(int displayIndex, bool moveMouse) {
   g.lastShown = displayIndex;
   UpdatePip();
 
-  ShowToast(L"Glasses: " + label + L"   \u2022   Alt+D next");
+  ShowToast(L"Glasses: " + label + KeyHint(panel::kKeyNext, L"next"));
   panel::Invalidate();
 }
 
@@ -580,11 +608,17 @@ static void Cycle(int direction, bool moveMouse) {
   ShowSource(next, moveMouse);
 }
 
+static void PrivacyOff(bool quiet);
+
 static void StopMirroring() {
+  // With nothing on the glasses, blacked-out screens would leave you blind.
+  bool privacyWasOn = privacy::Current() != privacy::Mode::kOff;
+  if (privacyWasOn) PrivacyOff(true);
   viewer::Stop();
   g.currentSource = -1;
   RefreshMonitors();
-  ShowToast(L"Glasses: extended desktop");
+  ShowToast(privacyWasOn ? L"Glasses: extended desktop   •   Privacy off"
+                         : L"Glasses: extended desktop");
   panel::Invalidate();
 }
 
@@ -593,7 +627,7 @@ static void StopMirroring() {
 static bool IsUserWindow(HWND hwnd) {
   if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) return false;
   if (hwnd == g.hwnd || hwnd == g_toast || hwnd == g_pickFrame ||
-      hwnd == viewer::Window() ||
+      hwnd == viewer::Window() || privacy::IsCoverWindow(hwnd) ||
       hwnd == panel::Window() || hwnd == GetShellWindow()) {
     return false;
   }
@@ -615,7 +649,9 @@ static std::wstring WindowTitle(HWND hwnd) {
 // glasses switch to that monitor first.
 static void LockToWindow(HWND hwnd) {
   if (!IsUserWindow(hwnd)) {
-    ShowToast(L"Click a window first, then Alt+W");
+    std::wstring keys = KeyLabel(panel::kKeyWindowLock);
+    ShowToast(keys.empty() ? L"Click a window first"
+                           : L"Click a window first, then " + keys);
     return;
   }
 
@@ -647,7 +683,7 @@ static void LockToWindow(HWND hwnd) {
   std::wstring name = WindowTitle(hwnd);
   viewer::LockWindow(hwnd, name);
   if (name.size() > 40) name = name.substr(0, 39) + L"\u2026";
-  ShowToast(L"Locked to " + name + L"   \u2022   Alt+W unlocks");
+  ShowToast(L"Locked to " + name + KeyHint(panel::kKeyWindowLock, L"unlocks"));
 }
 
 static bool IsLocked() {
@@ -837,7 +873,9 @@ static void SetPipOn(bool on) {
   if (!m) {
     ShowToast(L"Picture-in-picture needs a second monitor");
   } else if (!viewer::IsRunning()) {
-    ShowToast(L"Picture-in-picture on   \u2022   shows with Alt+D");
+    std::wstring keys = KeyLabel(panel::kKeyNext);
+    ShowToast(keys.empty() ? L"Picture-in-picture on"
+                           : L"Picture-in-picture on   \u2022   shows with " + keys);
   } else {
     ShowToast(L"Picture-in-picture: " + ShortLabel(*m));
   }
@@ -880,15 +918,23 @@ static void CheckGlassesArrival() {
   ShowSource(pick, false);
 }
 
-// Resolution, layout or connection changed. The viewer is restarted so its
-// window and capture match the new layout.
+// Resolution, layout or connection changed. The viewer keeps its window and
+// sets its capture up again, so the glasses do not blink; it is restarted
+// only when the glasses changed size or the shown monitor is gone.
 static void OnDisplayChange() {
   RefreshMonitors();  // also stops the viewer if the glasses are gone
+  privacy::Refresh();  // covers follow the screens
   if (viewer::IsRunning() && g.currentSource >= 0) {
-    int current = g.currentSource;
-    viewer::Stop();
-    g.currentSource = -1;
-    ShowSource(current, false);
+    const MonitorInfo* glasses = FindGlasses();
+    const MonitorInfo* shown = FindMonitor(g.currentSource);
+    if (glasses && shown && viewer::Reload(glasses->deviceName)) {
+      panel::FollowMonitor(shown->bounds);
+    } else {
+      int current = g.currentSource;
+      viewer::Stop();
+      g.currentSource = -1;
+      ShowSource(current, false);
+    }
   }
   CheckGlassesArrival();
 }
@@ -984,6 +1030,30 @@ static void SetLensLayout(const viewmath::LensLayout& layout, bool commit) {
   if (commit) SaveLensLayout();
 }
 
+static std::wstring ReadSettingText(const wchar_t* name,
+                                    const wchar_t* fallback) {
+  wchar_t buf[512] = {0};
+  DWORD size = sizeof(buf);
+  if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_SZ,
+                   nullptr, buf, &size) != ERROR_SUCCESS) {
+    return fallback;
+  }
+  return buf;
+}
+
+static void WriteSettingText(const wchar_t* name, const std::wstring& value) {
+  HKEY k = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0,
+                      KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  RegSetValueExW(k, name, 0, REG_SZ, (const BYTE*)value.c_str(),
+                 (DWORD)((value.size() + 1) * sizeof(wchar_t)));
+  RegCloseKey(k);
+}
+
+static void LoadHotkeys();
+
 static void LoadSettings() {
   g.followCaret = ReadSetting(L"FollowCaret", true);
   g.autoShow = ReadSetting(L"AutoShow", true);
@@ -991,6 +1061,315 @@ static void LoadSettings() {
   viewer::SetFollowCaret(g.followCaret);
   LoadLensLayout();
   SetLensStep((int)ReadSettingNumber(L"EdgeLens", 1));
+  g.privacyScreens = ReadSettingNumber(L"PrivacyScreens", 0) == 1 ? 1 : 0;
+  g.privacyMethod = ReadSettingNumber(L"PrivacyMethod", 0) == 1 ? 1 : 0;
+  g.privacyDim = ReadSetting(L"PrivacyDim", true);
+  g.privacyStandIn = ReadSettingText(L"PrivacyStandIn", L"");
+  LoadHotkeys();
+}
+
+// ---------------------------------------------------------------------------
+// Hotkeys: one row per shortcut, in panel::Key order. The defaults here are
+// what the README lists (tools/check_docs.ps1 checks them).
+// ---------------------------------------------------------------------------
+struct HotkeyDef {
+  panel::Key key;
+  const wchar_t* setting;  // registry value, text like "Alt+D"
+  const wchar_t* fallback;
+  const wchar_t* title;
+  const wchar_t* detail;
+};
+
+static const HotkeyDef kHotkeys[panel::kKeyCount] = {
+    {panel::kKeyNext, L"HotkeyNext", L"Alt+D", L"Next monitor",
+     L"Show the next monitor; the mouse and focus go along"},
+    {panel::kKeyPrevious, L"HotkeyPrevious", L"Alt+Shift+D", L"Previous monitor",
+     L"Show the previous monitor"},
+    {panel::kKeyStop, L"HotkeyStop", L"Ctrl+Alt+D", L"Stop",
+     L"The glasses go back to a normal extended desktop"},
+    {panel::kKeyZoom, L"HotkeyZoom", L"Alt+Z", L"Zoom",
+     L"1x, 1.5x, 2x, Fit, then 1x again"},
+    {panel::kKeyZoomBack, L"HotkeyZoomBack", L"Alt+Shift+Z", L"Zoom the other way",
+     L"Fit, 2x, 1.5x, 1x"},
+    {panel::kKeyWindowLock, L"HotkeyWindowLock", L"Alt+W", L"Window lock",
+     L"Show only the active window; again to unlock"},
+    {panel::kKeyPip, L"HotkeyPip", L"Alt+P", L"Picture-in-picture",
+     L"A live view of your other monitor, on or off"},
+    {panel::kKeyPrivacy, L"HotkeyPrivacy", L"Ctrl+Alt+P", L"Privacy mode",
+     L"Black out your screens; the glasses keep working"},
+};
+
+struct HotkeyState {
+  hotkeys::Combo combo;
+  bool registered = false;
+  std::wstring problem;  // shown in the Shortcuts card
+};
+static HotkeyState g_keys[panel::kKeyCount];
+static bool g_recordingKeys = false;  // the panel is listening for new keys
+
+// The key's name on the keyboard in use: punctuation differs per layout.
+static std::wstring LayoutKeyName(unsigned vk) {
+  UINT ch = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7FFFFFFF;
+  if (ch >= 0x21) return std::wstring(1, (wchar_t)towupper((wint_t)ch));
+  wchar_t name[32] = {0};
+  LONG scan = (LONG)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+  if (scan && GetKeyNameTextW(scan << 16, name, 32) > 0) return name;
+  return hotkeys::KeyName(vk);
+}
+
+static std::wstring ComboLabel(const hotkeys::Combo& c) {
+  if (c.empty()) return L"";
+  if (!hotkeys::IsOemKey(c.vk)) return hotkeys::Format(c);
+  std::wstring keys = hotkeys::Format(c);
+  keys.erase(keys.size() - hotkeys::KeyName(c.vk).size());
+  return keys + LayoutKeyName(c.vk);
+}
+
+static std::wstring KeyLabel(panel::Key key) {
+  return ComboLabel(g_keys[key].combo);
+}
+
+// On keyboards with an AltGr key, Ctrl+Alt+key types a character (Ctrl+Alt+Q
+// is @ on a German keyboard). A shortcut there would stop it being typed.
+static wchar_t AltGrCharacter(const hotkeys::Combo& c) {
+  const unsigned both = hotkeys::kCtrl | hotkeys::kAlt;
+  if ((c.mods & both) != both || (c.mods & hotkeys::kWin)) return 0;
+  HWND fg = GetForegroundWindow();
+  HKL layout = GetKeyboardLayout(fg ? GetWindowThreadProcessId(fg, nullptr) : 0);
+  BYTE keys[256] = {0};
+  keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80;
+  keys[VK_MENU] = keys[VK_RMENU] = 0x80;
+  if (c.mods & hotkeys::kShift) keys[VK_SHIFT] = keys[VK_LSHIFT] = 0x80;
+  wchar_t out[8] = {0};
+  UINT scan = MapVirtualKeyExW(c.vk, MAPVK_VK_TO_VSC, layout);
+  // Flag 4: leave the keyboard's dead-key state alone (Windows 10 1607+).
+  int n = ToUnicodeEx(c.vk, scan, keys, out, 8, 4, layout);
+  if (n != 0 && out[0] >= 0x20) return out[0];
+  return 0;
+}
+
+static void UnregisterHotkeys() {
+  for (int i = 0; i < panel::kKeyCount; ++i) {
+    UnregisterHotKey(g.hwnd, i + 1);
+    g_keys[i].registered = false;
+  }
+}
+
+// Registers every shortcut that is set, and notes why one did not work.
+// Returns how many could not be registered.
+static int RegisterHotkeys() {
+  UnregisterHotkeys();
+  int failed = 0;
+  for (int i = 0; i < panel::kKeyCount; ++i) {
+    HotkeyState& k = g_keys[i];
+    k.problem.clear();
+    if (k.combo.empty()) continue;
+    for (int j = 0; j < i; ++j) {
+      if (g_keys[j].combo == k.combo) {
+        k.problem = std::wstring(L"Same keys as ") + kHotkeys[j].title +
+                    L". Pick other keys";
+      }
+    }
+    if (!k.problem.empty()) {
+      failed++;
+      continue;
+    }
+    k.registered = RegisterHotKey(g.hwnd, i + 1, k.combo.mods | MOD_NOREPEAT,
+                                  k.combo.vk) != FALSE;
+    if (!k.registered) {
+      k.problem = L"Used by another app or by Windows. Pick other keys";
+      failed++;
+    } else if (wchar_t ch = AltGrCharacter(k.combo)) {
+      k.problem = std::wstring(L"Works, but your keyboard types “") + ch +
+                  L"” with it, which stops working";
+    }
+  }
+  return failed;
+}
+
+static void LoadHotkeys() {
+  for (int i = 0; i < panel::kKeyCount; ++i) {
+    std::wstring text = ReadSettingText(kHotkeys[i].setting, kHotkeys[i].fallback);
+    if (!hotkeys::Parse(text, &g_keys[i].combo)) {
+      hotkeys::Parse(kHotkeys[i].fallback, &g_keys[i].combo);
+    }
+  }
+}
+
+// The panel is about to listen for new keys: ours must not catch them.
+static void BeginRecordingKeys() {
+  if (g_recordingKeys) return;
+  g_recordingKeys = true;
+  UnregisterHotkeys();
+}
+
+static void EndRecordingKeys() {
+  if (!g_recordingKeys) return;
+  g_recordingKeys = false;
+  RegisterHotkeys();
+  panel::Invalidate();
+}
+
+// Sets shortcut |key|. Returns why it was refused, or "" when it was set.
+static std::wstring SetHotkey(int key, unsigned mods, unsigned vk) {
+  if (key < 0 || key >= panel::kKeyCount) return L"";
+  hotkeys::Combo c;
+  c.mods = mods;
+  c.vk = vk;
+  if (!c.empty()) {
+    if (const wchar_t* problem = hotkeys::Problem(c)) return problem;
+    for (int j = 0; j < panel::kKeyCount; ++j) {
+      if (j != key && g_keys[j].combo == c) {
+        return ComboLabel(c) + L" is already " + kHotkeys[j].title;
+      }
+    }
+    if (wchar_t ch = AltGrCharacter(c)) {
+      return ComboLabel(c) + L" types “" + std::wstring(1, ch) +
+             L"” on your keyboard. Pick other keys";
+    }
+    // Ours are off while recording, so a failure here is someone else's.
+    bool wasOff = g_recordingKeys;
+    if (!wasOff) UnregisterHotkeys();
+    bool free = RegisterHotKey(g.hwnd, HOTKEY_PROBE, c.mods | MOD_NOREPEAT,
+                               c.vk) != FALSE;
+    if (free) UnregisterHotKey(g.hwnd, HOTKEY_PROBE);
+    if (!wasOff) RegisterHotkeys();
+    if (!free) return ComboLabel(c) + L" is used by another app or by Windows";
+  }
+  g_keys[key].combo = c;
+  WriteSettingText(kHotkeys[key].setting, hotkeys::Format(c));
+  if (!g_recordingKeys) RegisterHotkeys();
+  panel::Invalidate();
+  return L"";
+}
+
+static void ResetHotkeys() {
+  for (int i = 0; i < panel::kKeyCount; ++i) {
+    hotkeys::Parse(kHotkeys[i].fallback, &g_keys[i].combo);
+    WriteSettingText(kHotkeys[i].setting, kHotkeys[i].fallback);
+  }
+  if (!g_recordingKeys) RegisterHotkeys();
+  panel::Invalidate();
+}
+
+// At start-up: one message for every shortcut that did not register.
+static void ReportHotkeyProblems() {
+  std::wstring taken;
+  int n = 0;
+  for (int i = 0; i < panel::kKeyCount; ++i) {
+    if (g_keys[i].combo.empty() || g_keys[i].registered) continue;
+    if (n++) taken += L", ";
+    taken += ComboLabel(g_keys[i].combo);
+  }
+  if (n == 0) return;
+  ShowBalloon(kAppName, taken + (n == 1 ? L" is" : L" are") +
+                            L" used by another app. Pick other keys under "
+                            L"Shortcuts in the control panel.");
+}
+
+// ---------------------------------------------------------------------------
+// Privacy mode
+// ---------------------------------------------------------------------------
+static privacy::Options PrivacyOptions() {
+  privacy::Options o;
+  o.allScreens = g.privacyScreens == 1;
+  o.switchOff = g.privacyMethod == 0;
+  o.dim = g.privacyDim;
+  o.standIn = g.privacyStandIn;
+  return o;
+}
+
+// The screen the glasses show, if they show one.
+struct Shown {
+  std::wstring device;
+  RECT bounds = {0, 0, 0, 0};
+};
+
+static Shown ShownScreen() {
+  Shown s;
+  if (!viewer::IsRunning()) return s;
+  if (const MonitorInfo* m = FindMonitor(g.currentSource)) {
+    s.device = m->deviceName;
+    s.bounds = m->bounds;
+  }
+  return s;
+}
+
+// After screens were swapped for stand-ins or back: if the screen the
+// glasses showed went away, show the one that took its exact place.
+static void FollowSwap(const Shown& shown) {
+  RefreshMonitors();
+  if (shown.device.empty()) return;
+  for (const auto& m : g.monitors) {
+    if (m.deviceName == shown.device && EqualRect(&m.bounds, &shown.bounds)) {
+      return;  // still there
+    }
+  }
+  const MonitorInfo* glasses = FindGlasses();
+  for (const auto& m : g.monitors) {
+    if (m.isViture || !EqualRect(&m.bounds, &shown.bounds)) continue;
+    // The viewer switches over in place: no new window, no blink.
+    if (!glasses || !viewer::Reload(glasses->deviceName)) {
+      viewer::Stop();
+      g.currentSource = -1;
+    }
+    ShowSource(m.displayIndex, false);
+    return;
+  }
+}
+
+static void PrivacyOn() {
+  RefreshMonitors();
+  const MonitorInfo* glasses = FindGlasses();
+  if (!glasses) {
+    ShowToast(L"⚠  Viture glasses not connected");
+    ShowBalloon(kAppName,
+                L"Connect the glasses first: Privacy mode blacks out your "
+                L"screens and keeps your work on the glasses.");
+    return;
+  }
+  if (!viewer::IsRunning()) {
+    Cycle(+1, false);
+    if (!viewer::IsRunning()) return;
+  }
+  std::wstring glassesDevice = glasses->deviceName;
+  Shown shown = ShownScreen();
+  std::wstring summary, note;
+  if (!privacy::Start(PrivacyOptions(), glassesDevice, &summary, &note)) {
+    ShowToast(L"⚠  " + summary);
+    ShowBalloon(kAppName, L"Privacy mode could not start. " + summary);
+    panel::Invalidate();
+    return;
+  }
+  if (privacy::Current() == privacy::Mode::kSwitchedOff) FollowSwap(shown);
+  ShowToast(L"Privacy on: " + summary + KeyHint(panel::kKeyPrivacy, L"ends it"));
+  if (!note.empty()) ShowBalloon(L"Privacy mode", note);
+  panel::Invalidate();
+}
+
+static void PrivacyOff(bool quiet) {
+  if (privacy::Current() == privacy::Mode::kOff) return;
+  bool wasSwitched = privacy::Current() == privacy::Mode::kSwitchedOff;
+  Shown shown = ShownScreen();
+  privacy::Stop();
+  if (wasSwitched) FollowSwap(shown);
+  if (!quiet) ShowToast(L"Privacy off");
+  panel::Invalidate();
+}
+
+static void TogglePrivacy() {
+  if (privacy::Current() != privacy::Mode::kOff) {
+    PrivacyOff(false);
+  } else {
+    PrivacyOn();
+  }
+}
+
+// A Privacy setting changed: if it is on, apply the change right away.
+static void ReapplyPrivacy() {
+  if (privacy::Current() == privacy::Mode::kOff) return;
+  PrivacyOff(true);
+  PrivacyOn();
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,8 +1383,10 @@ static void AddTrayIcon() {
   nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
   nid.uCallbackMessage = WM_APP + 1;
   nid.hIcon = g.icon;
-  wcsncpy_s(nid.szTip, L"Viture HUD  -  Alt+D cycles the glasses",
-            _TRUNCATE);
+  std::wstring keys = KeyLabel(panel::kKeyNext);
+  std::wstring tip = keys.empty() ? std::wstring(L"Viture HUD")
+                                  : L"Viture HUD  -  " + keys + L" cycles the glasses";
+  wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
   Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
@@ -1081,7 +1462,7 @@ static void CreateDesktopShortcut() {
     if (dir[i] == L'\\') { dir[i] = L'\0'; break; }
   }
   link->SetWorkingDirectory(dir);
-  link->SetDescription(L"Viture HUD - show monitors on the glasses (Alt+D)");
+  link->SetDescription(L"Viture HUD - show monitors on the glasses");
 
   IPersistFile* pf = nullptr;
   if (SUCCEEDED(link->QueryInterface(IID_IPersistFile, (void**)&pf))) {
@@ -1122,13 +1503,27 @@ static void ShowContextMenu() {
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_POPUP, (UINT_PTR)sources, L"Show on glasses");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, MENU_CYCLE, L"Next monitor\tAlt+D");
-  AppendMenuW(menu, MF_STRING, MENU_STOP, L"Stop mirroring\tCtrl+Alt+D");
+  auto withKeys = [](const wchar_t* text, panel::Key key) {
+    std::wstring keys = KeyLabel(key);
+    return keys.empty() ? std::wstring(text) : std::wstring(text) + L"\t" + keys;
+  };
+  AppendMenuW(menu, MF_STRING, MENU_CYCLE,
+              withKeys(L"Next monitor", panel::kKeyNext).c_str());
+  AppendMenuW(menu, MF_STRING, MENU_STOP,
+              withKeys(L"Stop mirroring", panel::kKeyStop).c_str());
   AppendMenuW(menu, MF_STRING, MENU_REFRESH, L"Refresh monitors");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  bool privacyOn = privacy::Current() != privacy::Mode::kOff;
+  AppendMenuW(menu,
+              MF_STRING | (privacyOn ? MF_CHECKED : 0) |
+                  (privacyOn || hasGlasses ? 0 : MF_GRAYED),
+              MENU_PRIVACY, withKeys(L"Privacy mode", panel::kKeyPrivacy).c_str());
+  AppendMenuW(menu, MF_STRING, MENU_PRIVACY_SETTINGS, L"Privacy settings…");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : 0),
               MENU_AUTOSTART, L"Start with Windows");
   AppendMenuW(menu, MF_STRING, MENU_SHORTCUT, L"Create Desktop shortcut");
+  AppendMenuW(menu, MF_STRING, MENU_SHORTCUTS, L"Keyboard shortcuts…");
   AppendMenuW(menu, MF_STRING, MENU_ABOUT, L"About");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, MENU_EXIT, L"Exit");
@@ -1178,6 +1573,36 @@ static panel::State PanelState() {
   s.fps = stats.fps;
   s.duplication = stats.duplication;
   s.scale = stats.scale;
+
+  for (int i = 0; i < panel::kKeyCount; ++i) {
+    panel::Shortcut sc;
+    sc.title = kHotkeys[i].title;
+    sc.detail = kHotkeys[i].detail;
+    sc.keys = ComboLabel(g_keys[i].combo);
+    // While recording, ours are off on purpose: that is not a problem.
+    if (!g_recordingKeys) sc.problem = g_keys[i].problem;
+    s.shortcuts.push_back(sc);
+  }
+
+  switch (privacy::Current()) {
+    case privacy::Mode::kOff: s.privacy = 0; break;
+    case privacy::Mode::kCovered: s.privacy = 1; break;
+    case privacy::Mode::kSwitchedOff: s.privacy = 2; break;
+  }
+  s.privacyNote = privacy::Note();
+  s.privacySummary = privacy::Summary();
+  s.hasBuiltIn = g.hasBuiltIn;
+  s.canCover = privacy::CanCover();
+  s.privacyScreens = g.privacyScreens;
+  s.privacyMethod = g.privacyMethod;
+  s.privacyDim = g.privacyDim;
+  s.standIn = g.privacyStandIn;
+  for (const auto& si : g.standIns) s.standIns.push_back({si.id, si.name});
+  // A stand-in chosen earlier but not connected now is still shown, so it
+  // is clear why switching off falls back to covering.
+  bool listed = g.privacyStandIn.empty();
+  for (const auto& si : s.standIns) listed |= si.id == g.privacyStandIn;
+  if (!listed) s.standIns.push_back({g.privacyStandIn, L"Chosen display (not connected)"});
   return s;
 }
 
@@ -1239,6 +1664,36 @@ static void InitPanel() {
     WriteSetting(L"AutoShow", on);
   };
   a.setStartWithWindows = [](bool on) { SetAutostart(on); };
+  a.beginRecording = [] { BeginRecordingKeys(); };
+  a.endRecording = [] { EndRecordingKeys(); };
+  a.setShortcut = [](int key, unsigned mods, unsigned vk) {
+    return SetHotkey(key, mods, vk);
+  };
+  a.resetShortcuts = [] { ResetHotkeys(); };
+  a.togglePrivacy = [] { TogglePrivacy(); };
+  a.setPrivacyScreens = [](int screens) {
+    if (g.privacyScreens == (screens == 1 ? 1 : 0)) return;
+    g.privacyScreens = screens == 1 ? 1 : 0;
+    WriteSettingNumber(L"PrivacyScreens", (DWORD)g.privacyScreens);
+    ReapplyPrivacy();
+  };
+  a.setPrivacyMethod = [](int method) {
+    if (g.privacyMethod == (method == 1 ? 1 : 0)) return;
+    g.privacyMethod = method == 1 ? 1 : 0;
+    WriteSettingNumber(L"PrivacyMethod", (DWORD)g.privacyMethod);
+    ReapplyPrivacy();
+  };
+  a.setPrivacyDim = [](bool on) {
+    g.privacyDim = on;
+    WriteSetting(L"PrivacyDim", on);
+    ReapplyPrivacy();
+  };
+  a.setStandIn = [](const std::wstring& id) {
+    if (g.privacyStandIn == id) return;
+    g.privacyStandIn = id;
+    WriteSettingText(L"PrivacyStandIn", id);
+    ReapplyPrivacy();
+  };
   panel::Init(g.instance, g.icon, a);
 }
 
@@ -1258,22 +1713,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam,
       return 0;
 
     case WM_HOTKEY:
-      if (wParam == HOTKEY_CYCLE) {
-        Cycle(+1, true);
-      } else if (wParam == HOTKEY_PREV) {
-        Cycle(-1, true);
-      } else if (wParam == HOTKEY_STOP) {
-        StopMirroring();
-      } else if (wParam == HOTKEY_ZOOM_NEXT || wParam == HOTKEY_ZOOM_PREV) {
-        if (viewer::IsRunning()) {
-          viewer::StepZoom(wParam == HOTKEY_ZOOM_NEXT ? +1 : -1);
-        } else {
-          ShowToast(L"Show a monitor first (Alt+D)");
+      switch ((int)wParam - 1) {
+        case panel::kKeyNext: Cycle(+1, true); break;
+        case panel::kKeyPrevious: Cycle(-1, true); break;
+        case panel::kKeyStop: StopMirroring(); break;
+        case panel::kKeyZoom:
+        case panel::kKeyZoomBack: {
+          if (viewer::IsRunning()) {
+            viewer::StepZoom((int)wParam - 1 == panel::kKeyZoom ? +1 : -1);
+          } else {
+            std::wstring keys = KeyLabel(panel::kKeyNext);
+            ShowToast(keys.empty() ? L"Show a monitor first"
+                                   : L"Show a monitor first (" + keys + L")");
+          }
+          break;
         }
-      } else if (wParam == HOTKEY_LOCK) {
-        ToggleWindowLock();
-      } else if (wParam == HOTKEY_PIP) {
-        SetPipOn(!g.pipOn);
+        case panel::kKeyWindowLock: ToggleWindowLock(); break;
+        case panel::kKeyPip: SetPipOn(!g.pipOn); break;
+        case panel::kKeyPrivacy: TogglePrivacy(); break;
       }
       return 0;
 
@@ -1317,6 +1774,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam,
         panel::Show(PanelHome());
       } else if (id == MENU_ABOUT) {
         panel::ShowAbout(PanelHome());
+      } else if (id == MENU_SHORTCUTS) {
+        panel::ShowShortcuts(PanelHome());
+      } else if (id == MENU_PRIVACY_SETTINGS) {
+        panel::ShowPrivacy(PanelHome());
+      } else if (id == MENU_PRIVACY) {
+        TogglePrivacy();
       } else if (id == MENU_CYCLE) {
         Cycle(+1, true);
       } else if (id == MENU_STOP) {
@@ -1336,15 +1799,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam,
       return 0;
     }
 
+    case WM_ENDSESSION:
+      // Signing out or shutting down: screens and brightness back first.
+      if (wParam) privacy::Shutdown();
+      return 0;
+
     case WM_DESTROY:
+      privacy::Shutdown();
       RemoveTrayIcon();
-      UnregisterHotKey(hwnd, HOTKEY_CYCLE);
-      UnregisterHotKey(hwnd, HOTKEY_PREV);
-      UnregisterHotKey(hwnd, HOTKEY_STOP);
-      UnregisterHotKey(hwnd, HOTKEY_ZOOM_NEXT);
-      UnregisterHotKey(hwnd, HOTKEY_ZOOM_PREV);
-      UnregisterHotKey(hwnd, HOTKEY_LOCK);
-      UnregisterHotKey(hwnd, HOTKEY_PIP);
+      UnregisterHotkeys();
       StopPick();
       panel::Close();
       viewer::Stop();
@@ -1395,29 +1858,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   g.icon = LoadIconW(instance, L"IDI_APP");
   if (!g.icon) g.icon = LoadIconW(nullptr, IDI_APPLICATION);
 
-  AddTrayIcon();
+  // A Privacy mode left on by a crash: screens and brightness back first.
+  privacy::RecoverAfterCrash();
+
   LoadSettings();
+  AddTrayIcon();
   InitPanel();
   RefreshMonitors();
 
-  // Alt+D cycles, Alt+Shift+D goes back, Ctrl+Alt+D stops,
-  // Alt+Z / Alt+Shift+Z zoom, Alt+W locks to the active window, Alt+P
-  // toggles picture-in-picture.
-  g.hotkeysOk = true;
-  if (!RegisterHotKey(g.hwnd, HOTKEY_CYCLE, MOD_ALT | MOD_NOREPEAT, 'D')) {
-    g.hotkeysOk = false;
-  }
-  RegisterHotKey(g.hwnd, HOTKEY_PREV, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'D');
-  RegisterHotKey(g.hwnd, HOTKEY_STOP, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D');
-  RegisterHotKey(g.hwnd, HOTKEY_ZOOM_NEXT, MOD_ALT | MOD_NOREPEAT, 'Z');
-  RegisterHotKey(g.hwnd, HOTKEY_ZOOM_PREV, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
-                 'Z');
-  RegisterHotKey(g.hwnd, HOTKEY_LOCK, MOD_ALT | MOD_NOREPEAT, 'W');
-  RegisterHotKey(g.hwnd, HOTKEY_PIP, MOD_ALT | MOD_NOREPEAT, 'P');
-
-  if (!g.hotkeysOk) {
-    ShowBalloon(kAppName, L"Alt+D is already used by another app.");
-  }
+  // Every shortcut from the Shortcuts card; a message names any that
+  // another app already has.
+  g.hotkeysOk = RegisterHotkeys() == 0;
+  ReportHotkeyProblems();
 
   // Re-scan displays periodically so plugging the glasses in is noticed, and
   // start right away if they are already connected.

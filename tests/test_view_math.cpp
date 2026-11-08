@@ -8,6 +8,7 @@
 // panning that reaches exactly the content's edges, the dead zone and easing
 // of smooth panning, and where the picture-in-picture and edge lens go.
 #include "glasses_id.h"
+#include "hotkeys.h"
 #include "view_math.h"
 
 #include <cmath>
@@ -261,7 +262,61 @@ static void TestGlassesId() {
   Check(!IsVitureDisplay(L"Generic PnP Monitor", L"DEL"), "a Dell is not glasses");
 }
 
+static bool RoundTrips(const wchar_t* text) {
+  hotkeys::Combo c;
+  return hotkeys::Parse(text, &c) && hotkeys::Format(c) == text;
+}
+
+static void TestHotkeys() {
+  printf("shortcuts\n");
+  using namespace hotkeys;
+  // Every default reads back exactly as written (the README lists them so).
+  Check(RoundTrips(L"Alt+D"), "Alt+D round-trips");
+  Check(RoundTrips(L"Alt+Shift+D"), "Alt+Shift+D round-trips");
+  Check(RoundTrips(L"Ctrl+Alt+D"), "Ctrl+Alt+D round-trips");
+  Check(RoundTrips(L"Alt+Z"), "Alt+Z round-trips");
+  Check(RoundTrips(L"Alt+Shift+Z"), "Alt+Shift+Z round-trips");
+  Check(RoundTrips(L"Alt+W"), "Alt+W round-trips");
+  Check(RoundTrips(L"Alt+P"), "Alt+P round-trips");
+  Check(RoundTrips(L"Ctrl+Alt+P"), "Ctrl+Alt+P round-trips");
+  Check(RoundTrips(L"Ctrl+Alt+Shift+Win+F12"), "all modifiers, in order");
+  Check(RoundTrips(L"Alt+Num+"), "a key whose name ends in +");
+  Check(RoundTrips(L"Ctrl+Shift+0xBA"), "punctuation is stored by code");
+  Check(RoundTrips(L"Alt+PageDown"), "named keys");
+
+  Combo c;
+  Check(Parse(L"shift+alt+d", &c) && Format(c) == L"Alt+Shift+D",
+        "any order and case reads back in the usual order");
+  Check(Parse(L"", &c) && c.empty(), "empty text means not set");
+  Check(!Parse(L"Alt+", &c), "a modifier needs a key");
+  Check(!Parse(L"Alt", &c), "a modifier alone is not a shortcut");
+  Check(!Parse(L"Alt+D+E", &c), "only one main key");
+  Check(!Parse(L"Alt+Banana", &c), "unknown key names are refused");
+  Check(!Parse(L"Alt+0x41", &c), "codes are only for punctuation keys");
+  Check(!Parse(L"Alt+F25", &c), "there is no F25");
+
+  auto problem = [](const wchar_t* text) {
+    Combo k;
+    Parse(text, &k);
+    return Problem(k) != nullptr;
+  };
+  Check(!problem(L"Alt+D"), "Alt+D is fine");
+  Check(!problem(L"Ctrl+Alt+P"), "Ctrl+Alt+P is fine");
+  Check(!problem(L"Ctrl+Shift+K"), "Ctrl+Shift+key is fine");
+  Check(!problem(L"Win+F9"), "Win+key is fine");
+  Check(!problem(L"F15"), "F13-F24 need no modifier: no app uses them");
+  Check(problem(L"D"), "a plain letter would break typing");
+  Check(problem(L"Shift+D"), "Shift+letter would break typing");
+  Check(problem(L"F5"), "a plain F-key is used by apps");
+  Check(problem(L"Ctrl+C"), "Ctrl+letter is used by every app");
+  Check(problem(L"Alt+F4"), "Alt+F4 closes windows");
+  Check(problem(L"Alt+Tab"), "Alt+Tab switches windows");
+  Check(problem(L"Ctrl+Alt+Delete"), "Ctrl+Alt+Delete is Windows'");
+  Check(Problem(Combo()) == nullptr, "not set is allowed");
+}
+
 int main() {
+  TestHotkeys();
   TestGlassesId();
   TestLensLayout();
   TestEdgeLens();

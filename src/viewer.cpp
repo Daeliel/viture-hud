@@ -89,6 +89,7 @@ struct Shared {
   int zoomStep = 0;         // index into viewmath::kZoomSteps
   int savedZoomStep = 0;    // zoom to return to when the lock ends
   unsigned generation = 0;  // bumped on every change that should re-centre
+  unsigned reload = 0;      // bumped when the display layout changed
   std::wstring pipDevice;   // monitor in the picture-in-picture, empty = off
   std::wstring pipLabel;
   double lensZoom = 1.0;    // edge lens magnification, 0 = off
@@ -311,6 +312,7 @@ struct Renderer {
   double panX = 0;
   double panY = 0;
   unsigned seenGeneration = ~0u;
+  unsigned seenReload = 0;
   POINT lastMouse = {-100000, -100000};
   ULONGLONG mouseMovedAt = 0;
   LARGE_INTEGER freq = {};
@@ -927,6 +929,14 @@ void RenderFrame() {
   }
 
   bool snap = false;
+  if (s.reload != r.seenReload) {
+    // The layout changed: monitors may have moved, resized or changed
+    // adapter. Capture is set up again; the window stays.
+    r.seenReload = s.reload;
+    r.main.device.clear();
+    r.pip.device.clear();
+    r.seenGeneration = ~0u;
+  }
   if (s.generation != r.seenGeneration) {
     r.seenGeneration = s.generation;
     snap = true;
@@ -1262,6 +1272,24 @@ void Stop() {
 }
 
 bool IsRunning() { return g_running.load(); }
+
+bool Reload(const std::wstring& targetMonitorDevice) {
+  if (!g_running.load() || !g_window || !IsWindow(g_window)) return false;
+  RECT gr = MonitorRect(targetMonitorDevice);
+  int gw = gr.right - gr.left;
+  int gh = gr.bottom - gr.top;
+  RECT client;
+  GetClientRect(g_window, &client);
+  if (gw <= 0 || gh <= 0 || client.right != gw || client.bottom != gh) {
+    return false;  // the glasses changed size: the window must be rebuilt
+  }
+  SetWindowPos(g_window, HWND_TOPMOST, gr.left, gr.top, gw, gh,
+               SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  std::lock_guard<std::mutex> hold(g_lock);
+  g_shared.reload++;
+  DebugTrace(L"Reload: capture set up again, window kept");
+  return true;
+}
 
 void FocusMonitor(const std::wstring& monitorDevice,
                   const std::wstring& label) {

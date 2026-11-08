@@ -31,6 +31,12 @@ void Stop();
 
 bool IsRunning();
 
+// After a display layout change: keeps the window (moved onto
+// |targetMonitorDevice| if it moved) and sets the capture up again, so the
+// glasses do not blink. False if the glasses changed size, or the viewer is
+// not running: then Stop and Start it.
+bool Reload(const std::wstring& targetMonitorDevice);
+
 // Centre the view on |monitorDevice| (a \.\DISPLAYn name). |label| is the
 // name shown in the status bar.
 void FocusMonitor(const std::wstring& monitorDevice, const std::wstring& label);

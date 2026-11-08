@@ -15,9 +15,9 @@ echo [build] app...
 REM -static bundles the MinGW C++ runtime, so the exe runs on any Windows
 REM 10/11 PC without extra DLLs.
 g++ -std=c++17 -O2 -municode -mwindows -static -Wall -Wextra -Wno-missing-field-initializers ^
-    -o build\viture_hud.exe src\viture_hud.cpp src\viewer.cpp src\panel.cpp build\icon.o ^
+    -o build\viture_hud.exe src\viture_hud.cpp src\viewer.cpp src\panel.cpp src\privacy.cpp build\icon.o ^
     -luser32 -lgdi32 -lshell32 -ladvapi32 -lole32 -ldwmapi -luuid ^
-    -ld3d11 -ldxgi -ld3dcompiler_47 -loleacc -loleaut32 -ld2d1 -ldwrite
+    -ld3d11 -ldxgi -ld3dcompiler_47 -loleacc -loleaut32 -ld2d1 -ldwrite -lwbemuuid
 if errorlevel 1 (echo [build] FAILED & exit /b 1)
 
 echo [build] tests...

@@ -15,6 +15,8 @@
 #include <cmath>
 #include <map>
 
+#include "hotkeys.h"
+
 namespace panel {
 
 namespace {
@@ -60,6 +62,9 @@ constexpr UINT32 kKnobOff = 0xC9D1D9;
 const wchar_t* const kZoomLabels[] = {L"1x", L"1.5x", L"2x", L"Fit"};
 const wchar_t* const kLensLabels[] = {L"Off", L"1x", L"1.5x", L"2x"};
 const wchar_t* const kLensModeLabels[] = {L"Follow cursor", L"Fixed spot"};
+const wchar_t* const kScreensLabels[] = {L"Main screen", L"All screens"};
+const wchar_t* const kMethodLabels[] = {L"Switch off", L"Cover"};
+constexpr int kMaxStandIns = 3;  // listed in the Privacy card
 
 enum HitId {
   kHitNone = 0,
@@ -81,8 +86,21 @@ enum HitId {
   kHitStop,
   kHitAbout,        // "About" in the header
   kHitAboutGithub,  // buttons on the About card
-  kHitAboutClose,
+  kHitCardClose,    // Close on any card
+  kHitShortcuts,    // "Shortcuts" in the header
+  kHitShortcut,     // a shortcut's keys on the Shortcuts card: arg is the Key
+  kHitShortcutsReset,
+  kHitPrivacy,          // Privacy mode on/off, next to Next monitor
+  kHitPrivacySettings,  // the gear on that button
+  kHitPrivacyToggle,    // on/off on the Privacy card
+  kHitPrivacyScreens,
+  kHitPrivacyMethod,
+  kHitStandIn,  // arg 0 none, n for the n-th stand-in
+  kHitPrivacyDim,
 };
+
+// A card shown over the panel. Only its own controls respond while it is open.
+enum Card { kCardNone, kCardAbout, kCardShortcuts, kCardPrivacy };
 
 struct Hit {
   D2D1_RECT_F rc;
@@ -130,7 +148,12 @@ int g_hoverArg = 0;
 int g_pressId = kHitNone;
 int g_pressArg = 0;
 bool g_trackingLeave = false;
-bool g_about = false;  // the About card is open over the panel
+Card g_card = kCardNone;
+
+// The shortcut being recorded (a Key), or -1, and why the last keys pressed
+// for it were refused.
+int g_recording = -1;
+std::wstring g_recordError;
 
 // Dragging in the lens editor.
 struct LensDrag {
@@ -430,6 +453,45 @@ bool Hovered(int id, int arg = 0) {
   return g_hoverId == id && g_hoverArg == arg;
 }
 
+// The keys of shortcut |key| ("Alt+D"), or empty when it is not set.
+std::wstring Keys(const State& s, int key) {
+  return key < (int)s.shortcuts.size() ? s.shortcuts[(size_t)key].keys : L"";
+}
+
+// "text  ·  Alt+D", or just the text when the shortcut is not set.
+std::wstring WithKeys(const std::wstring& text, const State& s, int key) {
+  std::wstring keys = Keys(s, key);
+  return keys.empty() ? text : text + L"  ·  " + keys;
+}
+
+int ShortcutProblems(const State& s) {
+  int n = 0;
+  for (const auto& sc : s.shortcuts) n += sc.problem.empty() ? 0 : 1;
+  return n;
+}
+
+// Small padlock, |size| tall, centred on (cx, cy).
+void DrawLockGlyph(float cx, float cy, UINT32 color, float alpha) {
+  g_brush->SetColor(Color(color, alpha));
+  D2D1_ROUNDED_RECT shackle = {Rect(cx - 4, cy - 8, cx + 4, cy + 2), 4, 4};
+  g_rt->DrawRoundedRectangle(shackle, g_brush, 1.6f);
+  D2D1_ROUNDED_RECT body = {Rect(cx - 6.5f, cy - 2, cx + 6.5f, cy + 7), 2, 2};
+  g_rt->FillRoundedRectangle(body, g_brush);
+}
+
+// Small cog for "settings".
+void DrawGearGlyph(float cx, float cy, UINT32 color, float alpha) {
+  g_brush->SetColor(Color(color, alpha));
+  g_rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 4.2f, 4.2f), g_brush,
+                    1.8f);
+  for (int i = 0; i < 8; ++i) {
+    float a = i * 3.14159265f / 4;
+    float c = std::cos(a), sn = std::sin(a);
+    g_rt->DrawLine(D2D1::Point2F(cx + c * 5.6f, cy + sn * 5.6f),
+                   D2D1::Point2F(cx + c * 8.2f, cy + sn * 8.2f), g_brush, 2.4f);
+  }
+}
+
 void DrawGlassesGlyph(float cx, float cy, UINT32 color, float alpha) {
   g_brush->SetColor(Color(color, alpha));
   const float lw = 22, lh = 14, gap = 8, stroke = 1.8f;
@@ -698,6 +760,17 @@ void DrawHeader(const State& s) {
   D2D1_RECT_F about = Rect(pill.rect.left - 12 - 84, 24, pill.rect.left - 12, 52);
   DrawButton(about, L"About", L"", false, true, Hovered(kHitAbout));
   AddHit(about, kHitAbout, 0, true);
+
+  // Shortcuts, with an orange dot when one of them does not work.
+  D2D1_RECT_F keys = Rect(about.left - 10 - 112, 24, about.left - 10, 52);
+  DrawButton(keys, L"Shortcuts", L"", false, true, Hovered(kHitShortcuts));
+  AddHit(keys, kHitShortcuts, 0, true);
+  if (ShortcutProblems(s) > 0) {
+    g_brush->SetColor(Color(kWarn));
+    g_rt->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(keys.right - 7, keys.top + 7), 4, 4),
+        g_brush);
+  }
 }
 
 void DrawSectionTitle(const std::wstring& title, float y,
@@ -729,7 +802,8 @@ void DrawView(const State& s) {
 
   // Zoom.
   D2D1_RECT_F row = Rect(card.left, card.top, card.right, card.top + kRowH);
-  DrawRowText(row, L"Zoom", L"1x is pixel-perfect  ·  Alt+Z", true);
+  DrawRowText(row, L"Zoom", WithKeys(L"1x is pixel-perfect", s, kKeyZoom),
+              true);
   float cy = (row.top + row.bottom) / 2;
   DrawSegmented(Rect(row.right - 16 - kControlW, cy - 17, row.right - 16,
                      cy + 17),
@@ -741,11 +815,11 @@ void DrawView(const State& s) {
   cy = (row.top + row.bottom) / 2;
   std::wstring detail;
   if (s.locked) {
-    detail = L"Showing only this window  ·  Alt+W";
+    detail = WithKeys(L"Showing only this window", s, kKeyWindowLock);
   } else if (s.picking) {
     detail = L"Click the window you want on the glasses";
   } else {
-    detail = L"Show one window, fitted  ·  Alt+W";
+    detail = WithKeys(L"Show one window, fitted", s, kKeyWindowLock);
   }
   bool canLock = s.glassesConnected;
   DrawRowText(row, L"Window lock", detail, s.glassesConnected);
@@ -775,10 +849,10 @@ void DrawView(const State& s) {
     g_brush->SetColor(Color(0xFFFFFF, 0.03f));
     g_rt->FillRoundedRectangle(hl, g_brush);
   }
-  std::wstring pipDetail =
-      s.pipName.empty()
-          ? L"Live view of your other monitor  \u00B7  Alt+P"
-          : L"Live view of " + s.pipName + L" in a corner  \u00B7  Alt+P";
+  std::wstring pipDetail = WithKeys(
+      s.pipName.empty() ? L"Live view of your other monitor"
+                        : L"Live view of " + s.pipName + L" in a corner",
+      s, kKeyPip);
   DrawRowText(row, L"Picture-in-picture", pipDetail, true);
   DrawToggle(row.right - 18, (row.top + row.bottom) / 2, s.pipOn, hover);
   AddHit(row, kHitPip, 0, true);
@@ -820,15 +894,75 @@ void DrawBehaviour(const State& s) {
   }
 }
 
+// Privacy mode as a split button: the main part turns it on or off, the cog
+// on the right opens its settings. Green while it is on.
+void DrawPrivacyButton(const D2D1_RECT_F& rc, const State& s) {
+  const bool on = s.privacy != 0;
+  const bool can = on || s.glassesConnected;
+  const float gearW = 44;
+  D2D1_RECT_F main = Rect(rc.left, rc.top, rc.right - gearW, rc.bottom);
+  D2D1_RECT_F gear = Rect(rc.right - gearW, rc.top, rc.right, rc.bottom);
+  const bool hoverMain = Hovered(kHitPrivacy) && can;
+  const bool hoverGear = Hovered(kHitPrivacySettings);
+
+  D2D1_ROUNDED_RECT rr = {rc, 9, 9};
+  if (on) {
+    g_brush->SetColor(Color(kAccent, 0.14f));
+    g_rt->FillRoundedRectangle(rr, g_brush);
+  }
+  // Each half lights up on its own when hovered.
+  if (hoverMain || hoverGear) {
+    g_brush->SetColor(Color(0xFFFFFF, 0.06f));
+    g_rt->PushAxisAlignedClip(hoverMain ? main : gear,
+                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    g_rt->FillRoundedRectangle(rr, g_brush);
+    g_rt->PopAxisAlignedClip();
+  }
+  if (on) {
+    g_brush->SetColor(Color(kAccent, 0.85f));
+    g_rt->DrawRoundedRectangle(rr, g_brush, 1.4f);
+  } else {
+    g_brush->SetColor(Color(0xFFFFFF, hoverMain || hoverGear ? 0.34f : 0.16f));
+    g_rt->DrawRoundedRectangle(rr, g_brush, 1.0f);
+  }
+  g_brush->SetColor(on ? Color(kAccent, 0.45f) : Color(0xFFFFFF, 0.12f));
+  g_rt->DrawLine(D2D1::Point2F(gear.left, rc.top + 10),
+                 D2D1::Point2F(gear.left, rc.bottom - 10), g_brush, 1.0f);
+
+  const UINT32 fg = on ? kAccent : kText;
+  const float alpha = can ? 1.0f : 0.4f;
+  const std::wstring label = on ? L"Privacy on" : L"Privacy";
+  const std::wstring keys = Keys(s, kKeyPrivacy);
+  float labelW = TextWidth(label, g_fStrong);
+  float keysW = keys.empty() ? 0 : TextWidth(keys, g_fSmall) + 10;
+  float total = 13 + 10 + labelW + keysW;
+  float x = (main.left + main.right - total) / 2;
+  DrawLockGlyph(x + 6.5f, (rc.top + rc.bottom) / 2 + 1, fg, alpha);
+  x += 13 + 10;
+  DrawLabel(label, g_fStrong, Rect(x, rc.top, x + labelW + 1, rc.bottom), fg,
+            alpha);
+  if (!keys.empty()) {
+    DrawLabel(keys, g_fSmall,
+              Rect(x + labelW + 10, rc.top, x + labelW + keysW + 1, rc.bottom),
+              fg, alpha * 0.6f);
+  }
+  DrawGearGlyph((gear.left + gear.right) / 2, (rc.top + rc.bottom) / 2,
+                on ? kAccent : kMuted, hoverGear ? 1.0f : 0.85f);
+  AddHit(main, kHitPrivacy, 0, can);
+  AddHit(gear, kHitPrivacySettings, 0, true);
+}
+
 void DrawActions(const State& s) {
   float top = 746, bottom = 794;
   bool canNext = s.glassesConnected;
-  D2D1_RECT_F stop = Rect(kLeftEnd - 190, top, kLeftEnd, bottom);
-  D2D1_RECT_F next = Rect(kPad, top, stop.left - 12, bottom);
-  DrawButton(next, L"Next monitor", L"Alt+D", true, canNext,
+  D2D1_RECT_F stop = Rect(kLeftEnd - 168, top, kLeftEnd, bottom);
+  D2D1_RECT_F privacy = Rect(stop.left - 12 - 246, top, stop.left - 12, bottom);
+  D2D1_RECT_F next = Rect(kPad, top, privacy.left - 12, bottom);
+  DrawButton(next, L"Next monitor", Keys(s, kKeyNext), true, canNext,
              Hovered(kHitNext) && canNext);
   AddHit(next, kHitNext, 0, canNext);
-  DrawButton(stop, L"Stop", L"Ctrl+Alt+D", false, s.showing,
+  DrawPrivacyButton(privacy, s);
+  DrawButton(stop, L"Stop", Keys(s, kKeyStop), false, s.showing,
              Hovered(kHitStop) && s.showing);
   AddHit(stop, kHitStop, 0, s.showing);
 
@@ -837,7 +971,9 @@ void DrawActions(const State& s) {
   if (!s.glassesConnected) {
     line = L"Plug in the glasses to start";
   } else if (!s.showing) {
-    line = L"Nothing on the glasses  ·  press Alt+D";
+    std::wstring next = Keys(s, kKeyNext);
+    line = next.empty() ? L"Nothing on the glasses  ·  click a monitor above"
+                        : L"Nothing on the glasses  ·  press " + next;
   } else {
     std::wstring name;
     for (const auto& d : s.displays) {
@@ -848,11 +984,15 @@ void DrawActions(const State& s) {
                name.c_str(), s.scale, s.fps,
                s.duplication ? L"Desktop Duplication" : L"GDI capture (slow)");
     line = buf;
+    if (s.privacy != 0) line = L"Privacy on  ·  " + line;
   }
-  DrawLabel(line, g_fSmall, Rect(kPad + 2, 808, kLeftEnd, 828), kMuted);
-  DrawLabel(L"Alt+Shift+D previous", g_fSmall,
-            Rect(kPad, 808, kLeftEnd, 828), kDim, 1.0f,
-            DWRITE_TEXT_ALIGNMENT_TRAILING);
+  DrawLabel(line, g_fSmall, Rect(kPad + 2, 808, kLeftEnd - 150, 828),
+            s.privacy != 0 ? kAccent : kMuted);
+  std::wstring previous = Keys(s, kKeyPrevious);
+  if (!previous.empty()) {
+    DrawLabel(previous + L" previous", g_fSmall, Rect(kPad, 808, kLeftEnd, 828),
+              kDim, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+  }
 }
 
 // The edge lens column: magnification, placement, and a small picture of the
@@ -1032,6 +1172,25 @@ void DrawLensEditor(const State& s) {
   AddHit(reset, kHitLensReset, 0, on);
 }
 
+// Dims the panel and draws an empty card |w| x |h| in the middle, with a
+// green dot and |caption| at its top. Returns the card's top-left.
+void DrawModal(float w, float h, const wchar_t* caption, float* left,
+               float* top) {
+  *left = (kWidth - w) / 2;
+  *top = std::fmax(12.0f, (kHeight - h) / 2);
+  g_brush->SetColor(Color(0x000000, 0.66f));
+  g_rt->FillRectangle(Rect(0, 0, kWidth, kHeight), g_brush);
+  D2D1_ROUNDED_RECT card = {Rect(*left, *top, *left + w, *top + h), 14, 14};
+  g_brush->SetColor(Color(kSurface));
+  g_rt->FillRoundedRectangle(card, g_brush);
+  g_brush->SetColor(Color(0xFFFFFF, 0.10f));
+  g_rt->DrawRoundedRectangle(card, g_brush, 1.0f);
+  const float x = *left + 32, y = *top + 28;
+  g_brush->SetColor(Color(kAccent));
+  g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 4, y + 7), 4, 4), g_brush);
+  DrawSpaced(caption, g_fCaps, x + 16, y, 1.6f, kMuted);
+}
+
 // The About card: who made the app, why, and the one thank-you asked for.
 // Drawn over the dimmed panel; while it is open only its buttons respond.
 void DrawAbout() {
@@ -1057,23 +1216,10 @@ void DrawAbout() {
   const float askH = DrawWrapped(ask, g_fWrapBody, 0, 0, textW, kText, false);
   const float cardH =
       28 + 26 + 26 + 20 + 22 + whyH + 14 + askH + 26 + 40 + 20 + 18 + 26;
-  const float left = (kWidth - cardW) / 2;
-  const float top = std::fmax(kPad, (kHeight - cardH) / 2);
+  float left = 0, top = 0;
+  DrawModal(cardW, cardH, L"ABOUT THE DEVELOPER", &left, &top);
   const float x = left + pad, right = left + cardW - pad;
-
-  g_brush->SetColor(Color(0x000000, 0.66f));
-  g_rt->FillRectangle(Rect(0, 0, kWidth, kHeight), g_brush);
-  D2D1_ROUNDED_RECT card = {Rect(left, top, left + cardW, top + cardH), 14, 14};
-  g_brush->SetColor(Color(kSurface));
-  g_rt->FillRoundedRectangle(card, g_brush);
-  g_brush->SetColor(Color(0xFFFFFF, 0.10f));
-  g_rt->DrawRoundedRectangle(card, g_brush, 1.0f);
-
-  float y = top + 28;
-  g_brush->SetColor(Color(kAccent));
-  g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 4, y + 7), 4, 4), g_brush);
-  DrawSpaced(L"ABOUT THE DEVELOPER", g_fCaps, x + 16, y, 1.6f, kMuted);
-  y += 26;
+  float y = top + 28 + 26;
   DrawLabel(name, g_fTitle, Rect(x, y, right, y + 26), kText);
   y += 26;
   DrawLabel(tagline, g_fBody, Rect(x, y, right, y + 20), kMuted);
@@ -1088,10 +1234,318 @@ void DrawAbout() {
   DrawButton(github, L"Contribute on GitHub", L"", true, true,
              Hovered(kHitAboutGithub));
   AddHit(github, kHitAboutGithub, 0, true);
-  DrawButton(close, L"Close", L"Esc", false, true, Hovered(kHitAboutClose));
-  AddHit(close, kHitAboutClose, 0, true);
+  DrawButton(close, L"Close", L"Esc", false, true, Hovered(kHitCardClose));
+  AddHit(close, kHitCardClose, 0, true);
   y += 40 + 20;
   DrawLabel(footer, g_fSmall, Rect(x, y, right, y + 18), kDim);
+}
+
+// A row on a card: a dark well with a title and a muted line on the left and
+// a toggle on the right. The whole row is the click target.
+void DrawToggleRow(const D2D1_RECT_F& row, const std::wstring& title,
+                   const std::wstring& detail, bool on, int hitId,
+                   bool enabled) {
+  bool hover = Hovered(hitId) && enabled;
+  D2D1_ROUNDED_RECT well = {row, 10, 10};
+  g_brush->SetColor(Color(kWell));
+  g_rt->FillRoundedRectangle(well, g_brush);
+  if (hover) {
+    g_brush->SetColor(Color(0xFFFFFF, 0.03f));
+    g_rt->FillRoundedRectangle(well, g_brush);
+  }
+  g_brush->SetColor(Color(0xFFFFFF, hover ? 0.16f : 0.07f));
+  g_rt->DrawRoundedRectangle(well, g_brush, 1.0f);
+  float mid = (row.top + row.bottom) / 2;
+  DrawLabel(title, g_fStrong, Rect(row.left + 18, mid - 19, row.right - 80, mid + 1),
+            enabled ? kText : kDim);
+  DrawLabel(detail, g_fSmall, Rect(row.left + 18, mid + 1, row.right - 80, mid + 19),
+            kMuted, enabled ? 1.0f : 0.6f);
+  if (enabled) {
+    DrawToggle(row.right - 18, mid, on, hover);
+  } else {
+    D2D1_ROUNDED_RECT track = {
+        Rect(row.right - 60, mid - 12, row.right - 18, mid + 12), 12, 12};
+    g_brush->SetColor(Color(kTrackOff, 0.5f));
+    g_rt->FillRoundedRectangle(track, g_brush);
+  }
+  AddHit(row, hitId, 0, enabled);
+}
+
+// The Privacy card: on/off, which screens, how, the stand-in display and
+// the brightness.
+void DrawPrivacy(const State& s) {
+  const float cardW = 680, pad = 32, textW = cardW - 2 * pad;
+  const bool switchOff = s.privacyMethod == 0;
+  const std::wstring keys = Keys(s, kKeyPrivacy);
+
+  std::wstring intro =
+      L"Your screens go dark, so nobody can read them over your shoulder. "
+      L"The glasses keep showing your work.";
+  if (!keys.empty()) intro += L" " + keys + L" turns it on and off.";
+
+  std::wstring status;
+  if (s.privacy != 0) {
+    status = L"On  ·  " + (s.privacySummary.empty() ? std::wstring(L"active")
+                                                    : s.privacySummary);
+  } else if (!s.glassesConnected) {
+    status = L"Off  ·  connect the glasses to use it";
+  } else {
+    status = L"Off";
+  }
+
+  const bool all = s.privacyScreens == 1;
+  const std::wstring which =
+      all ? L"every screen but the glasses"
+          : (s.hasBuiltIn ? L"the built-in screen" : L"the main screen");
+  std::wstring help;
+  if (switchOff) {
+    help = L"Switch off turns " + which + L" off. A stand-in display takes " +
+           (all ? L"each one's" : L"its") +
+           L" exact place and size, so your windows stay where they are." +
+           (all ? L" Each screen needs its own stand-in; screens without one "
+                  L"are covered."
+                : L" Without a stand-in, the screen is covered instead.");
+  } else {
+    help = L"Cover lays black over " + which +
+           L". The glasses still see what is underneath and nothing in "
+           L"Windows changes, but the mouse pointer and some pop-ups can show "
+           L"on top.";
+  }
+  if (!all && !s.hasBuiltIn) {
+    help += L" The main screen is your primary one.";
+  }
+  if (!s.canCover) {
+    help += L" Covering needs Windows 10 version 2004 or newer.";
+  }
+
+  const bool showStandIns = switchOff;
+  const int standInCount =
+      (int)std::fmin((float)s.standIns.size(), (float)kMaxStandIns);
+  const std::wstring setup =
+      L"No spare display found. Install a virtual display driver (for "
+      L"example Virtual Display Driver), give it the same resolution as the "
+      L"screen it stands in for, then choose “Disconnect this display” for "
+      L"it in Settings > Display. It shows up here.";
+
+  const float introH = DrawWrapped(intro, g_fWrapBody, 0, 0, textW, kText, false);
+  const float helpH = DrawWrapped(help, g_fWrap, 0, 0, textW, kMuted, false);
+  const float setupH = DrawWrapped(setup, g_fWrap, 0, 0, textW, kMuted, false);
+  const float noteH = s.privacyNote.empty()
+                          ? 0
+                          : DrawWrapped(s.privacyNote, g_fWrap, 0, 0, textW - 28,
+                                        kWarn, false);
+  float standInH = 0;
+  if (showStandIns) {
+    standInH = 22 + (standInCount == 0 ? setupH + 4 : 40.0f * (standInCount + 1)) +
+               18;
+  }
+  const float cardH = 28 + 26 + 30 + introH + 20 + 62 + 22 + 22 + 36 + 12 +
+                      helpH + 18 + standInH + 58 + 16 +
+                      (noteH > 0 ? noteH + 20 + 14 : 0) + 40 + 28;
+
+  float left = 0, top = 0;
+  DrawModal(cardW, cardH, L"PRIVACY MODE", &left, &top);
+  const float x = left + pad, right = left + cardW - pad;
+  float y = top + 28 + 26;
+
+  DrawLabel(L"Black out your screens", g_fTitle, Rect(x, y, right, y + 26), kText);
+  y += 30;
+  DrawWrapped(intro, g_fWrapBody, x, y, textW, kText);
+  y += introH + 20;
+
+  bool canToggle = s.privacy != 0 || s.glassesConnected;
+  DrawToggleRow(Rect(x, y, right, y + 62), L"Privacy mode", status,
+                s.privacy != 0, kHitPrivacyToggle, canToggle);
+  y += 62 + 22;
+
+  // Which screens, and how, side by side.
+  const float colW = (textW - 16) / 2;
+  DrawSpaced(L"SCREENS", g_fCaps, x + 2, y, 1.6f, kMuted);
+  DrawSpaced(L"HOW", g_fCaps, x + colW + 16 + 2, y, 1.6f, kMuted);
+  y += 22;
+  const wchar_t* const screensLabels[] = {
+      s.hasBuiltIn ? L"Built-in screen" : L"Main screen", kScreensLabels[1]};
+  DrawSegmented(Rect(x, y, x + colW, y + 36), screensLabels, 2,
+                s.privacyScreens, kHitPrivacyScreens);
+  DrawSegmented(Rect(x + colW + 16, y, right, y + 36), kMethodLabels, 2,
+                s.privacyMethod, kHitPrivacyMethod);
+  y += 36 + 12;
+  DrawWrapped(help, g_fWrap, x, y, textW, kMuted);
+  y += helpH + 18;
+
+  if (showStandIns) {
+    DrawSpaced(L"STAND-IN DISPLAY", g_fCaps, x + 2, y, 1.6f, kMuted);
+    y += 22;
+    if (standInCount == 0) {
+      DrawWrapped(setup, g_fWrap, x, y, textW, kMuted);
+      y += setupH + 4;
+    } else {
+      for (int i = 0; i <= standInCount; ++i) {
+        const bool none = i == 0;
+        const std::wstring id = none ? L"" : s.standIns[(size_t)i - 1].id;
+        const std::wstring name =
+            none ? L"None  ·  cover the screen instead"
+                 : s.standIns[(size_t)i - 1].name;
+        const bool picked = s.standIn == id;
+        D2D1_RECT_F row = Rect(x, y, right, y + 36);
+        const bool hover = Hovered(kHitStandIn, i);
+        if (hover || picked) {
+          D2D1_ROUNDED_RECT hl = {row, 8, 8};
+          g_brush->SetColor(picked ? Color(kAccent, 0.07f)
+                                   : Color(0xFFFFFF, 0.04f));
+          g_rt->FillRoundedRectangle(hl, g_brush);
+        }
+        float cy = (row.top + row.bottom) / 2;
+        D2D1_POINT_2F c = D2D1::Point2F(row.left + 20, cy);
+        g_brush->SetColor(picked ? Color(kAccent) : Color(0xFFFFFF, 0.35f));
+        g_rt->DrawEllipse(D2D1::Ellipse(c, 8, 8), g_brush, 1.6f);
+        if (picked) {
+          g_rt->FillEllipse(D2D1::Ellipse(c, 4, 4), g_brush);
+        }
+        DrawLabel(name, none ? g_fBody : g_fStrong,
+                  Rect(row.left + 40, row.top, row.right - 110, row.bottom),
+                  none ? kMuted : kText);
+        if (picked && !none && s.privacy == 2) {
+          const std::wstring badge = L"IN USE";
+          float bw = TextWidth(badge, g_fBadge) + 16;
+          D2D1_ROUNDED_RECT pill = {
+              Rect(row.right - 12 - bw, cy - 9, row.right - 12, cy + 9), 9, 9};
+          g_brush->SetColor(Color(kAccent));
+          g_rt->FillRoundedRectangle(pill, g_brush);
+          DrawLabel(badge, g_fBadge, pill.rect, kOnAccent, 1.0f,
+                    DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        AddHit(row, kHitStandIn, i, true);
+        y += 40;
+      }
+    }
+    y += 18;
+  }
+
+  DrawToggleRow(Rect(x, y, right, y + 58), L"Turn the brightness down",
+                s.hasBuiltIn
+                    ? L"While covered, the built-in screen goes to 0%, and back after"
+                    : L"Only for a laptop's own screen; there is none here",
+                s.privacyDim, kHitPrivacyDim, s.hasBuiltIn);
+  y += 58 + 16;
+
+  if (noteH > 0) {
+    D2D1_ROUNDED_RECT box = {Rect(x, y, right, y + noteH + 20), 8, 8};
+    g_brush->SetColor(Color(kWarn, 0.08f));
+    g_rt->FillRoundedRectangle(box, g_brush);
+    g_brush->SetColor(Color(kWarn, 0.35f));
+    g_rt->DrawRoundedRectangle(box, g_brush, 1.0f);
+    g_brush->SetColor(Color(kWarn));
+    g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 15, y + 17), 3.5f, 3.5f),
+                      g_brush);
+    DrawWrapped(s.privacyNote, g_fWrap, x + 28, y + 10, textW - 28, kWarn);
+    y += noteH + 20 + 14;
+  }
+
+  D2D1_RECT_F close = Rect(right - 110, y, right, y + 40);
+  DrawButton(close, L"Close", L"Esc", false, true, Hovered(kHitCardClose));
+  AddHit(close, kHitCardClose, 0, true);
+}
+
+// The Shortcuts card: every hotkey, click one and press new keys.
+void DrawShortcuts(const State& s) {
+  const float cardW = 660, pad = 32, textW = cardW - 2 * pad;
+  const float rowH = 52;
+  const std::wstring intro =
+      L"Click a shortcut, then press the keys you want. Esc cancels, "
+      L"Backspace removes the shortcut.";
+  const std::wstring caveat =
+      L"Shortcuts that only work inside another app, like Alt+B in Firefox, "
+      L"cannot be detected. If an app stops reacting to a key, pick a "
+      L"different one here.";
+  const float introH = DrawWrapped(intro, g_fWrap, 0, 0, textW, kMuted, false);
+  const float caveatH = DrawWrapped(caveat, g_fWrap, 0, 0, textW, kDim, false);
+  const int count = (int)s.shortcuts.size();
+  const float cardH = 28 + 26 + 30 + introH + 18 + rowH * count + 8 + 14 +
+                      caveatH + 22 + 40 + 28;
+
+  float left = 0, top = 0;
+  DrawModal(cardW, cardH, L"SHORTCUTS", &left, &top);
+  const float x = left + pad, right = left + cardW - pad;
+  float y = top + 28 + 26;
+
+  DrawLabel(L"Keyboard shortcuts", g_fTitle, Rect(x, y, right, y + 26), kText);
+  y += 30;
+  DrawWrapped(intro, g_fWrap, x, y, textW, kMuted);
+  y += introH + 18;
+
+  D2D1_ROUNDED_RECT well = {Rect(x, y, right, y + rowH * count + 8), 10, 10};
+  g_brush->SetColor(Color(kWell));
+  g_rt->FillRoundedRectangle(well, g_brush);
+  g_brush->SetColor(Color(0xFFFFFF, 0.07f));
+  g_rt->DrawRoundedRectangle(well, g_brush, 1.0f);
+  y += 4;
+
+  const float chipW = 190;
+  for (int i = 0; i < count; ++i) {
+    const Shortcut& sc = s.shortcuts[(size_t)i];
+    D2D1_RECT_F row = Rect(x, y, right, y + rowH);
+    const bool recording = g_recording == i;
+    const bool hover = Hovered(kHitShortcut, i);
+    float cy = (row.top + row.bottom) / 2;
+
+    // What it does, or what went wrong.
+    std::wstring line = sc.detail;
+    UINT32 lineColor = kMuted;
+    if (recording && !g_recordError.empty()) {
+      line = g_recordError;
+      lineColor = kWarn;
+    } else if (!sc.problem.empty()) {
+      line = sc.problem;
+      lineColor = kWarn;
+    }
+    float textRight = right - 16 - chipW - 16;
+    DrawLabel(sc.title, g_fStrong, Rect(x + 18, cy - 19, textRight, cy + 1), kText);
+    DrawLabel(line, g_fSmall, Rect(x + 18, cy + 1, textRight, cy + 19), lineColor);
+
+    // The keys, as a chip.
+    D2D1_RECT_F chip = Rect(right - 16 - chipW, cy - 16, right - 16, cy + 16);
+    D2D1_ROUNDED_RECT cr = {chip, 8, 8};
+    std::wstring text = sc.keys;
+    UINT32 textColor = kText;
+    if (recording) {
+      g_brush->SetColor(Color(kAccent, 0.10f));
+      g_rt->FillRoundedRectangle(cr, g_brush);
+      g_brush->SetColor(Color(kAccent));
+      g_rt->DrawRoundedRectangle(cr, g_brush, 1.6f);
+      text = L"Press keys…";
+      textColor = kAccent;
+    } else {
+      g_brush->SetColor(Color(0xFFFFFF, hover ? 0.08f : 0.04f));
+      g_rt->FillRoundedRectangle(cr, g_brush);
+      UINT32 border = sc.problem.empty() ? 0xFFFFFF : kWarn;
+      g_brush->SetColor(Color(border, sc.problem.empty() ? (hover ? 0.34f : 0.14f)
+                                                         : 0.7f));
+      g_rt->DrawRoundedRectangle(cr, g_brush, 1.0f);
+      if (text.empty()) {
+        text = L"Not set";
+        textColor = kDim;
+      }
+    }
+    DrawLabel(text, g_fStrong, chip, textColor, 1.0f,
+              DWRITE_TEXT_ALIGNMENT_CENTER);
+    AddHit(chip, kHitShortcut, i, true);
+
+    if (i + 1 < count) DrawDivider(x + 16, right - 16, row.bottom);
+    y += rowH;
+  }
+  y += 4 + 14;
+
+  DrawWrapped(caveat, g_fWrap, x, y, textW, kDim);
+  y += caveatH + 22;
+
+  D2D1_RECT_F reset = Rect(x, y, x + 170, y + 40);
+  DrawButton(reset, L"Reset to defaults", L"", false, true,
+             Hovered(kHitShortcutsReset));
+  AddHit(reset, kHitShortcutsReset, 0, true);
+  D2D1_RECT_F close = Rect(right - 110, y, right, y + 40);
+  DrawButton(close, L"Close", L"Esc", false, true, Hovered(kHitCardClose));
+  AddHit(close, kHitCardClose, 0, true);
 }
 
 void Paint() {
@@ -1108,9 +1562,11 @@ void Paint() {
   DrawBehaviour(s);
   DrawActions(s);
   DrawLensEditor(s);
-  if (g_about) {
+  if (g_card != kCardNone) {
     g_hits.clear();  // the panel underneath does not respond while it is open
-    DrawAbout();
+    if (g_card == kCardAbout) DrawAbout();
+    if (g_card == kCardShortcuts) DrawShortcuts(s);
+    if (g_card == kCardPrivacy) DrawPrivacy(s);
   }
   if (g_rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) DiscardTarget();
 }
@@ -1125,6 +1581,62 @@ const Hit* HitAt(LPARAM lParam) {
     if (Contains(h.rc, x, y)) return &h;
   }
   return nullptr;
+}
+
+void StopRecording() {
+  if (g_recording < 0) return;
+  g_recording = -1;
+  g_recordError.clear();
+  if (g_actions.endRecording) g_actions.endRecording();
+}
+
+void StartRecording(int key) {
+  StopRecording();
+  if (g_actions.beginRecording) g_actions.beginRecording();
+  g_recording = key;
+  g_recordError.clear();
+  SetFocus(g_hwnd);
+}
+
+void OpenCard(Card card) {
+  StopRecording();
+  g_card = card;
+  g_hoverId = kHitNone;  // the hit list changes when a card opens or closes
+  if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+bool IsModifierKey(UINT vk) {
+  return vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU ||
+         vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL ||
+         vk == VK_RCONTROL || vk == VK_LMENU || vk == VK_RMENU ||
+         vk == VK_LWIN || vk == VK_RWIN || vk == VK_CAPITAL ||
+         vk == VK_NUMLOCK || vk == VK_APPS;
+}
+
+// A key went down while a shortcut is being recorded.
+void RecordKey(UINT vk) {
+  if (IsModifierKey(vk)) return;  // wait for the main key
+  unsigned mods = 0;
+  if (GetKeyState(VK_CONTROL) < 0) mods |= hotkeys::kCtrl;
+  if (GetKeyState(VK_MENU) < 0) mods |= hotkeys::kAlt;
+  if (GetKeyState(VK_SHIFT) < 0) mods |= hotkeys::kShift;
+  if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) {
+    mods |= hotkeys::kWin;
+  }
+  if (mods == 0 && vk == VK_ESCAPE) {
+    StopRecording();
+  } else if (mods == 0 && (vk == VK_BACK || vk == VK_DELETE)) {
+    g_actions.setShortcut(g_recording, 0, 0);
+    StopRecording();
+  } else {
+    std::wstring error = g_actions.setShortcut(g_recording, mods, vk);
+    if (error.empty()) {
+      StopRecording();
+    } else {
+      g_recordError = error;  // keep listening: try other keys
+    }
+  }
+  InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void Activate(int id, int arg) {
@@ -1149,14 +1661,36 @@ void Activate(int id, int arg) {
     case kHitStartup: g_actions.setStartWithWindows(!s.startWithWindows); break;
     case kHitNext: g_actions.next(); break;
     case kHitStop: g_actions.stop(); break;
-    case kHitAbout: g_about = true; break;
-    case kHitAboutClose: g_about = false; break;
+    case kHitAbout: OpenCard(kCardAbout); break;
+    case kHitShortcuts: OpenCard(kCardShortcuts); break;
+    case kHitPrivacySettings: OpenCard(kCardPrivacy); break;
+    case kHitCardClose: OpenCard(kCardNone); break;
     case kHitAboutGithub:
       ShellExecuteW(g_hwnd, L"open", kRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
       break;
-  }
-  if (id == kHitAbout || id == kHitAboutClose) {
-    g_hoverId = kHitNone;  // the hit list changes when the card opens or closes
+    case kHitShortcut:
+      if (g_recording == arg) {
+        StopRecording();
+      } else {
+        StartRecording(arg);
+      }
+      break;
+    case kHitShortcutsReset:
+      StopRecording();
+      g_actions.resetShortcuts();
+      break;
+    case kHitPrivacy:
+    case kHitPrivacyToggle: g_actions.togglePrivacy(); break;
+    case kHitPrivacyScreens: g_actions.setPrivacyScreens(arg); break;
+    case kHitPrivacyMethod: g_actions.setPrivacyMethod(arg); break;
+    case kHitPrivacyDim: g_actions.setPrivacyDim(!s.privacyDim); break;
+    case kHitStandIn:
+      if (arg == 0) {
+        g_actions.setStandIn(L"");
+      } else if (arg - 1 < (int)s.standIns.size()) {
+        g_actions.setStandIn(s.standIns[(size_t)arg - 1].id);
+      }
+      break;
   }
   InvalidateRect(g_hwnd, nullptr, FALSE);
 }
@@ -1325,15 +1859,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       break;
     case WM_KEYDOWN:
-      if (wParam == VK_ESCAPE) {
-        if (g_about) {
-          g_about = false;
-          g_hoverId = kHitNone;
-          InvalidateRect(hwnd, nullptr, FALSE);
+    case WM_SYSKEYDOWN:
+      // While recording, every key is for the shortcut: Alt+F4 or F10 must
+      // not reach Windows' own handling.
+      if (g_recording >= 0) {
+        RecordKey((UINT)wParam);
+        return 0;
+      }
+      if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        if (g_card != kCardNone) {
+          OpenCard(kCardNone);
         } else {
           Close();
         }
         return 0;
+      }
+      break;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+    case WM_SYSCHAR:
+      if (g_recording >= 0) return 0;
+      break;
+    case WM_SYSCOMMAND:
+      if (g_recording >= 0 && (wParam & 0xFFF0) == SC_KEYMENU) return 0;
+      break;
+    case WM_ACTIVATE:
+      // Recording only while the panel has the keyboard: elsewhere the
+      // hotkeys must work.
+      if (LOWORD(wParam) == WA_INACTIVE && g_recording >= 0) {
+        StopRecording();
+        InvalidateRect(hwnd, nullptr, FALSE);
       }
       break;
     case WM_CLOSE:
@@ -1348,7 +1904,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       g_hoverId = kHitNone;
       g_trackingLeave = false;
       g_drag.id = kHitNone;
-      g_about = false;
+      StopRecording();
+      g_card = kCardNone;
       return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1415,10 +1972,17 @@ void Show(const RECT& monitorBounds) {
 
 void ShowAbout(const RECT& monitorBounds) {
   Show(monitorBounds);
-  if (!g_hwnd) return;
-  g_about = true;
-  g_hoverId = kHitNone;
-  InvalidateRect(g_hwnd, nullptr, FALSE);
+  if (g_hwnd) OpenCard(kCardAbout);
+}
+
+void ShowShortcuts(const RECT& monitorBounds) {
+  Show(monitorBounds);
+  if (g_hwnd) OpenCard(kCardShortcuts);
+}
+
+void ShowPrivacy(const RECT& monitorBounds) {
+  Show(monitorBounds);
+  if (g_hwnd) OpenCard(kCardPrivacy);
 }
 
 void Close() {

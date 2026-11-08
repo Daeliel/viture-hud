@@ -30,6 +30,32 @@ struct Display {
   bool isPrimary = false;
 };
 
+// The keyboard shortcuts, in the order the Shortcuts card lists them.
+enum Key {
+  kKeyNext,
+  kKeyPrevious,
+  kKeyStop,
+  kKeyZoom,
+  kKeyZoomBack,
+  kKeyWindowLock,
+  kKeyPip,
+  kKeyPrivacy,
+  kKeyCount
+};
+
+struct Shortcut {
+  std::wstring title;    // "Next monitor"
+  std::wstring detail;   // what it does
+  std::wstring keys;     // "Alt+D", or empty when not set
+  std::wstring problem;  // why it does not work, or empty
+};
+
+// A virtual display that can stand in for a screen (see privacy.h).
+struct StandIn {
+  std::wstring id;
+  std::wstring name;
+};
+
 struct State {
   bool glassesConnected = false;
   bool showing = false;  // the viewer is running
@@ -50,6 +76,21 @@ struct State {
   int fps = 0;
   bool duplication = false;
   double scale = 1.0;
+
+  // Keyboard shortcuts, indexed by Key.
+  std::vector<Shortcut> shortcuts;
+
+  // Privacy mode.
+  int privacy = 0;            // 0 off, 1 covered, 2 switched off (some screens)
+  std::wstring privacyNote;   // a warning from the last start, or empty
+  std::wstring privacySummary;  // while on: what was done
+  bool hasBuiltIn = false;    // a built-in (laptop) screen is on
+  bool canCover = true;       // Windows 10 2004+: covers hide from capture
+  int privacyScreens = 0;     // 0 main screen, 1 all screens
+  int privacyMethod = 0;      // 0 switch off when a stand-in is set, 1 cover
+  bool privacyDim = true;     // brightness to 0% while covered
+  std::wstring standIn;       // the chosen stand-in's id, or empty
+  std::vector<StandIn> standIns;
 };
 
 struct Actions {
@@ -66,6 +107,21 @@ struct Actions {
   std::function<void(bool)> setFollowCaret;
   std::function<void(bool)> setAutoShow;
   std::function<void(bool)> setStartWithWindows;
+
+  // While a shortcut is being recorded the app's own hotkeys are off, so the
+  // keys reach the panel.
+  std::function<void()> beginRecording;
+  std::function<void()> endRecording;
+  // Sets shortcut |key| (vk 0 removes it). Returns why it was refused, or
+  // an empty string when it was set.
+  std::function<std::wstring(int key, unsigned mods, unsigned vk)> setShortcut;
+  std::function<void()> resetShortcuts;
+
+  std::function<void()> togglePrivacy;
+  std::function<void(int screens)> setPrivacyScreens;
+  std::function<void(int method)> setPrivacyMethod;
+  std::function<void(bool)> setPrivacyDim;
+  std::function<void(const std::wstring& id)> setStandIn;
 };
 
 void Init(HINSTANCE instance, HICON icon, const Actions& actions);
@@ -76,6 +132,10 @@ void Init(HINSTANCE instance, HICON icon, const Actions& actions);
 void Show(const RECT& monitorBounds);
 // Show, then open the About card (who made the app and how to contribute).
 void ShowAbout(const RECT& monitorBounds);
+// Show, then open the Shortcuts card.
+void ShowShortcuts(const RECT& monitorBounds);
+// Show, then open the Privacy card.
+void ShowPrivacy(const RECT& monitorBounds);
 void Close();
 bool IsOpen();
 

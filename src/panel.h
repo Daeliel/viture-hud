@@ -91,6 +91,7 @@ struct State {
   bool privacyDim = true;     // brightness to 0% while covered
   std::wstring standIn;       // the chosen stand-in's id, or empty
   std::vector<StandIn> standIns;
+  int virtualScreensInUse = 0;  // virtual displays on as ordinary screens
 };
 
 struct Actions {

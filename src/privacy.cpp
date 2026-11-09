@@ -8,6 +8,7 @@
 #include <oleauto.h>
 #include <wbemidl.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <map>
@@ -498,7 +499,10 @@ bool SwitchOff(const std::vector<size_t>& targets, const std::wstring& preferred
     }
   }
   if (spare.empty() || spareIds[0] != preferred) {
-    *error = L"The stand-in is missing, or not disconnected in Settings.";
+    bool inUse = false;
+    for (const auto& a : active) inUse |= TargetPath(a, nullptr) == preferred;
+    *error = inUse ? L"The stand-in is in use as a screen. Disconnect it in Settings."
+                   : L"The stand-in is missing, or not disconnected in Settings.";
     return false;
   }
 
@@ -802,6 +806,57 @@ bool HasBuiltInScreen() {
 
 std::wstring Summary() { return g_summary; }
 
+std::vector<std::wstring> VirtualScreensInUse() {
+  std::vector<std::wstring> out;
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!QueryLayout(QDC_ONLY_ACTIVE_PATHS, &paths, &modes)) return out;
+  for (const auto& p : paths) {
+    if (!IsVirtualAdapter(p.targetInfo.adapterId)) continue;
+    std::wstring name;
+    std::wstring id = TargetPath(p, &name);
+    if (id.empty() || glassesid::IsVitureDisplay(name, ManufacturerFromPath(id))) {
+      continue;
+    }
+    bool standIn = false;
+    for (const auto& s : g_standIns) standIn |= s.id == id;
+    if (!standIn) out.push_back(id);
+  }
+  return out;
+}
+
+std::wstring VirtualDisplayName(const LUID& adapter, const std::wstring& id) {
+  if (id.empty() || !IsVirtualAdapter(adapter)) return L"";
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!QueryLayout(QDC_ALL_PATHS, &paths, &modes)) return L"Virtual display";
+
+  // Every virtual display, by the number the driver gave it ("...UID257#").
+  auto uid = [](const std::wstring& path) {
+    size_t at = path.find(L"UID");
+    return at == std::wstring::npos ? 0L : wcstol(path.c_str() + at + 3, nullptr, 10);
+  };
+  std::vector<std::wstring> all;
+  for (const auto& p : paths) {
+    if (!p.targetInfo.targetAvailable) continue;
+    if (!IsVirtualAdapter(p.targetInfo.adapterId)) continue;
+    std::wstring name;
+    std::wstring other = TargetPath(p, &name);
+    if (other.empty()) continue;
+    if (glassesid::IsVitureDisplay(name, ManufacturerFromPath(other))) continue;
+    if (std::find(all.begin(), all.end(), other) == all.end()) all.push_back(other);
+  }
+  std::sort(all.begin(), all.end(), [&](const std::wstring& a, const std::wstring& b) {
+    long ua = uid(a), ub = uid(b);
+    return ua != ub ? ua < ub : a < b;
+  });
+  if (all.size() < 2) return L"Virtual display";
+  for (size_t i = 0; i < all.size(); ++i) {
+    if (all[i] == id) return L"Virtual display " + std::to_wstring(i + 1);
+  }
+  return L"Virtual display";
+}
+
 std::vector<StandIn> FindStandIns() {
   std::vector<StandIn> out;
   std::vector<DISPLAYCONFIG_PATH_INFO> paths;
@@ -829,7 +884,7 @@ std::vector<StandIn> FindStandIns() {
     bool seen = false;
     for (const auto& s : out) seen |= s.id == id;
     if (seen) continue;
-    out.push_back({id, name.empty() ? L"Unnamed display" : name});
+    out.push_back({id, VirtualDisplayName(p.targetInfo.adapterId, id)});
   }
   return out;
 }
@@ -870,6 +925,7 @@ bool Start(const Options& options, const std::wstring& glassesDevice,
 
   std::vector<std::wstring> switched;
   std::wstring why;
+  // No stand-in chosen ("None") means: cover, on purpose, so no note.
   if (options.switchOff && !options.standIn.empty() && physical > 0) {
     SwitchOff(targets, options.standIn, &switched, &why, &g_note);
   }
@@ -922,7 +978,8 @@ bool Start(const Options& options, const std::wstring& glassesDevice,
   }
   g_summary = *summary;
   if (note) *note = g_note;
-  viewer::DebugTrace(L"Privacy: on (%ls)", summary->c_str());
+  viewer::DebugTrace(L"Privacy: on (%ls)%ls%ls", summary->c_str(),
+                     g_note.empty() ? L"" : L": ", g_note.c_str());
   return true;
 }
 

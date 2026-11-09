@@ -81,9 +81,9 @@ shortcut, keyboard shortcuts, about, exit.
 
 | Key (default) | Action |
 |---|---|
-| **Alt+D** | Show the next monitor on the glasses (the mouse and focus go along) |
+| **Alt+D** | Show the next monitor on the glasses (the mouse and focus go along); after the last one, the glasses become a normal extended screen, then it starts over |
 | **Alt+Shift+D** | Show the previous monitor |
-| **Ctrl+Alt+D** | Stop: the glasses go back to a normal extended desktop |
+| **Ctrl+Alt+D** | Stop: the glasses go back to a normal extended desktop, and the mouse onto them |
 | **Alt+Z** | Zoom: 1x → 1.5x → 2x → Fit → 1x |
 | **Alt+Shift+Z** | Zoom the other way |
 | **Alt+W** | Show only the active window, fitted to the glasses (again to unlock) |
@@ -112,7 +112,8 @@ type.
 - **Picture-in-picture**: a live view of your other monitor (with three or
   more, the next one in Alt+D order) in the bottom-right corner. It moves to the bottom-left when the mouse or text
   cursor comes near, and shows a small cursor when the mouse is on that
-  monitor.
+  monitor. It shows only while the glasses show a monitor, not while they
+  are an ordinary extended screen.
 - **Edge lens** (right-hand column):
   - **Magnification**: Off, 1x (same size, just moved in from the edge), 1.5x
     or 2x. It multiplies the current zoom: 2x on a view at 1.5x is 3x.
@@ -148,9 +149,14 @@ switch.
 
 Press **Ctrl+Alt+P** (or click **Privacy** in the panel) and your screens go
 dark, while the glasses keep showing your work. Press it again and they come
-back. Privacy mode also ends by itself when you stop the glasses, unplug them,
-exit Viture HUD or sign out, so you are never left with a dark screen and
-nothing to see on.
+back. Privacy mode also ends by itself when you unplug the glasses, exit
+Viture HUD or sign out, so you are never left with a dark screen and nothing
+to see on.
+
+To work on the glasses as an ordinary extended screen while Privacy mode is
+on, press **Ctrl+Alt+D**: the glasses stop showing a monitor, the mouse moves
+onto them and the other screens stay dark. Turning Privacy mode on while the
+glasses are an extended screen keeps them that way.
 
 The Privacy card (the cog next to **Privacy**) has its settings:
 
@@ -188,6 +194,12 @@ Setting up a stand-in, once:
    **Disconnect this display**. It stays available, just switched off.
 4. Pick one under **Stand-in display** in the Privacy card.
 
+A stand-in has to be a spare display. A virtual display you use as an extra
+screen can't also be a stand-in, so with a single virtual display it is one or
+the other: an extra screen, or *Switch off* (the Privacy card tells you when
+this is the case). Some laptops struggle with more than one virtual display;
+keeping the laptop's own screen as the primary one is the most stable setup.
+
 Only virtual displays are offered as stand-ins, never a real screen that is
 switched off: that would light it up with your work. Virtual displays that are
 already on are not switched off, as nobody can see them. If a stand-in cannot
@@ -216,7 +228,6 @@ checks the new keys straight away and refuses them, with the reason, when:
   keys, such as @ on German keyboards).
 
 F13-F24, if your keyboard or mouse has them, work without a modifier.
-
 Shortcuts that only work inside one app, like Alt+B in Firefox, are not
 visible to other programs, so they cannot be detected. If an app stops reacting
 to a key while Viture HUD runs, pick a different shortcut. **Reset to

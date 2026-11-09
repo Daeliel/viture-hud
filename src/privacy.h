@@ -79,6 +79,14 @@ bool HasBuiltInScreen();
 bool CanCover();
 // Displays that could be the stand-in.
 std::vector<StandIn> FindStandIns();
+// Ids of virtual displays switched on as ordinary screens (stand-ins at work
+// aside). They could be stand-ins only once disconnected.
+std::vector<std::wstring> VirtualScreensInUse();
+// "Virtual display 2" for a virtual display (just "Virtual display" when there
+// is only one), or empty for any other display. Virtual display drivers give
+// every display the same name, so the app numbers them in the driver's order.
+// |id| is the monitor's device path.
+std::wstring VirtualDisplayName(const LUID& adapter, const std::wstring& id);
 
 // One of the cover windows (so the app never treats it as a user window).
 bool IsCoverWindow(HWND hwnd);

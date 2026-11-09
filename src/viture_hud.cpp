@@ -184,6 +184,7 @@ static int DisplayIndexFromDeviceName(const std::wstring& name) {
 struct TargetName {
   std::wstring deviceName;
   std::wstring friendlyName;
+  std::wstring virtualName;  // "Virtual display 2", or empty (privacy.h)
 };
 
 // Asks the CCD API for the friendly name of every active target. The CCD
@@ -222,7 +223,9 @@ static std::vector<TargetName> ActiveTargetNames() {
     src.header.id = p.sourceInfo.id;
     if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS) continue;
 
-    out.push_back({src.viewGdiDeviceName, tgt.monitorFriendlyDeviceName});
+    out.push_back({src.viewGdiDeviceName, tgt.monitorFriendlyDeviceName,
+                   privacy::VirtualDisplayName(p.targetInfo.adapterId,
+                                               tgt.monitorDevicePath)});
   }
   return out;
 }
@@ -264,6 +267,7 @@ static std::vector<MonitorInfo> EnumerateMonitors() {
       if (t.deviceName != mi.deviceName) continue;
       ccdName = t.friendlyName;
       if (!t.friendlyName.empty()) monitorName = t.friendlyName;
+      if (!t.virtualName.empty()) monitorName = t.virtualName;
     }
     // Never match on the adapter or driver string: those are generic.
     mi.isViture = glassesid::IsVitureDisplay(ccdName, mfr);
@@ -503,6 +507,14 @@ static void MoveMouseTo(const MonitorInfo& target) {
   // Undo any confinement first, or SetCursorPos stays inside it.
   ClipCursor(nullptr);
   SetCursorPos(dest.x, dest.y);
+  // SetCursorPos is not a mouse move to the window now under the pointer, so
+  // it is not asked for its cursor: if the pointer was hidden (over the
+  // viewer on the glasses), it would stay hidden until the mouse moved. A
+  // zero-distance move is one.
+  INPUT nudge = {};
+  nudge.type = INPUT_MOUSE;
+  nudge.mi.dwFlags = MOUSEEVENTF_MOVE;
+  SendInput(1, &nudge, sizeof(nudge));
   FocusWindowOn(target, dest);
 }
 
@@ -570,10 +582,14 @@ static void ShowSource(int displayIndex, bool moveMouse) {
   g.lastShown = displayIndex;
   UpdatePip();
 
-  ShowToast(L"Glasses: " + label + KeyHint(panel::kKeyNext, L"next"));
+  ShowToast(L"Glasses: " + label);
   panel::Invalidate();
 }
 
+static void StopMirroring();
+
+// Alt+D / Alt+Shift+D. After the last monitor, the glasses as a screen of
+// their own (the viewer off) are one more stop.
 static void Cycle(int direction, bool moveMouse) {
   RefreshMonitors();
   std::vector<int> candidates = CandidateSources();
@@ -589,36 +605,44 @@ static void Cycle(int direction, bool moveMouse) {
     return;
   }
 
-  int next;
-  if (g.currentSource < 0) {
-    next = direction > 0 ? candidates.front() : candidates.back();
-  } else {
-    int pos = -1;
-    for (size_t i = 0; i < candidates.size(); ++i) {
-      if (candidates[i] == g.currentSource) pos = (int)i;
-    }
-    if (pos < 0) {
-      next = direction > 0 ? candidates.front() : candidates.back();
-    } else {
-      int n = (int)candidates.size();
-      pos = (pos + (direction > 0 ? 1 : -1) + n) % n;
-      next = candidates[(size_t)pos];
-    }
+  // The stops in order; -1 is the glasses' own screen.
+  std::vector<int> stops = candidates;
+  stops.push_back(-1);
+  const int current = viewer::IsRunning() ? g.currentSource : -1;
+  int pos = -1;
+  for (size_t i = 0; i < stops.size(); ++i) {
+    if (stops[i] == current) pos = (int)i;
   }
-  ShowSource(next, moveMouse);
+  int next;
+  if (pos < 0) {
+    next = direction > 0 ? stops.front() : stops.back();
+  } else {
+    int n = (int)stops.size();
+    next = stops[(size_t)((pos + (direction > 0 ? 1 : -1) + n) % n)];
+  }
+  if (next < 0) {
+    StopMirroring();
+  } else {
+    ShowSource(next, moveMouse);
+  }
 }
 
-static void PrivacyOff(bool quiet);
-
+// The glasses become an ordinary extended screen. Privacy mode stays on: the
+// glasses are still a screen you can see, and its shortcut brings the others
+// back. The mouse goes onto the glasses, since it may be on a screen that is
+// blacked out.
 static void StopMirroring() {
-  // With nothing on the glasses, blacked-out screens would leave you blind.
-  bool privacyWasOn = privacy::Current() != privacy::Mode::kOff;
-  if (privacyWasOn) PrivacyOff(true);
+  bool privacyOn = privacy::Current() != privacy::Mode::kOff;
   viewer::Stop();
   g.currentSource = -1;
+  UpdatePip();  // clears it, so a later start does not reuse a stale monitor
   RefreshMonitors();
-  ShowToast(privacyWasOn ? L"Glasses: extended desktop   •   Privacy off"
-                         : L"Glasses: extended desktop");
+  if (const MonitorInfo* glasses = FindGlasses()) MoveMouseTo(*glasses);
+  std::wstring text = L"Glasses: extended desktop";
+  if (privacyOn) text += L"   •   Privacy stays on";
+  // The PiP is drawn by the viewer, which is off now.
+  if (g.pipOn) text += L"   •   No picture-in-picture here";
+  ShowToast(text);
   panel::Invalidate();
 }
 
@@ -873,9 +897,11 @@ static void SetPipOn(bool on) {
   if (!m) {
     ShowToast(L"Picture-in-picture needs a second monitor");
   } else if (!viewer::IsRunning()) {
-    std::wstring keys = KeyLabel(panel::kKeyNext);
-    ShowToast(keys.empty() ? L"Picture-in-picture on"
-                           : L"Picture-in-picture on   \u2022   shows with " + keys);
+    // The glasses are an ordinary screen: the viewer, which draws the PiP,
+    // is off. The setting stays on for when a monitor is shown again.
+    ShowToast(FindGlasses()
+                  ? L"Picture-in-picture isn't available on the glasses' own screen"
+                  : L"Picture-in-picture on");
   } else {
     ShowToast(L"Picture-in-picture: " + ShortLabel(*m));
   }
@@ -1086,7 +1112,7 @@ static const HotkeyDef kHotkeys[panel::kKeyCount] = {
     {panel::kKeyPrevious, L"HotkeyPrevious", L"Alt+Shift+D", L"Previous monitor",
      L"Show the previous monitor"},
     {panel::kKeyStop, L"HotkeyStop", L"Ctrl+Alt+D", L"Stop",
-     L"The glasses go back to a normal extended desktop"},
+     L"The glasses become a normal extended screen, mouse included"},
     {panel::kKeyZoom, L"HotkeyZoom", L"Alt+Z", L"Zoom",
      L"1x, 1.5x, 2x, Fit, then 1x again"},
     {panel::kKeyZoomBack, L"HotkeyZoomBack", L"Alt+Shift+Z", L"Zoom the other way",
@@ -1328,10 +1354,9 @@ static void PrivacyOn() {
                 L"screens and keeps your work on the glasses.");
     return;
   }
-  if (!viewer::IsRunning()) {
-    Cycle(+1, false);
-    if (!viewer::IsRunning()) return;
-  }
+  // With the viewer stopped the glasses are an extended screen of their own,
+  // and stay one: you work on them directly.
+  const bool extended = !viewer::IsRunning();
   std::wstring glassesDevice = glasses->deviceName;
   Shown shown = ShownScreen();
   std::wstring summary, note;
@@ -1342,6 +1367,10 @@ static void PrivacyOn() {
     return;
   }
   if (privacy::Current() == privacy::Mode::kSwitchedOff) FollowSwap(shown);
+  if (extended) {
+    RefreshMonitors();
+    if (const MonitorInfo* g2 = FindGlasses()) MoveMouseTo(*g2);
+  }
   ShowToast(L"Privacy on: " + summary + KeyHint(panel::kKeyPrivacy, L"ends it"));
   if (!note.empty()) ShowBalloon(L"Privacy mode", note);
   panel::Invalidate();
@@ -1600,9 +1629,16 @@ static panel::State PanelState() {
   for (const auto& si : g.standIns) s.standIns.push_back({si.id, si.name});
   // A stand-in chosen earlier but not connected now is still shown, so it
   // is clear why switching off falls back to covering.
+  const std::vector<std::wstring> inUse = privacy::VirtualScreensInUse();
+  s.virtualScreensInUse = (int)inUse.size();
   bool listed = g.privacyStandIn.empty();
   for (const auto& si : s.standIns) listed |= si.id == g.privacyStandIn;
-  if (!listed) s.standIns.push_back({g.privacyStandIn, L"Chosen display (not connected)"});
+  if (!listed) {
+    bool on = false;
+    for (const auto& id : inUse) on |= id == g.privacyStandIn;
+    s.standIns.push_back({g.privacyStandIn, on ? L"Chosen display (in use as a screen)"
+                                               : L"Chosen display (not connected)"});
+  }
   return s;
 }
 

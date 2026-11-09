@@ -267,6 +267,7 @@ struct Source {
   IDXGIOutputDuplication* dup = nullptr;
   bool dupUnsupported = false;
   ULONGLONG dupRetryAt = 0;
+  HRESULT dupLastError = S_OK;  // logged once, not on every retry
 
   HDC gdiDC = nullptr;  // fallback capture
   HBITMAP gdiBmp = nullptr;
@@ -531,24 +532,40 @@ void StartDuplication(Source& src) {
   if (!src.output || !r.dev) return;
   HRESULT hr = src.output->DuplicateOutput(r.dev, &src.dup);
   if (FAILED(hr)) {
-    DebugTrace(L"DuplicateOutput %ls failed 0x%lX, using GDI",
-               src.device.c_str(), (unsigned long)hr);
+    // Retried every second (e.g. 0x80070005 while the lock screen or a UAC
+    // prompt is up): log a failure once, not on every retry.
+    if (hr != src.dupLastError) {
+      DebugTrace(L"DuplicateOutput %ls failed 0x%lX, using GDI",
+                 src.device.c_str(), (unsigned long)hr);
+    }
+    src.dupLastError = hr;
     src.dup = nullptr;
     src.dupRetryAt = GetTickCount64() + kDupRetryMs;
     return;
   }
+  if (FAILED(src.dupLastError)) {
+    DebugTrace(L"Duplication of %ls works again", src.device.c_str());
+  }
+  src.dupLastError = S_OK;
   DXGI_OUTDUPL_DESC desc;
   src.dup->GetDesc(&desc);
   if (desc.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
-      desc.Rotation != DXGI_MODE_ROTATION_IDENTITY ||
-      (int)desc.ModeDesc.Width != src.monW ||
-      (int)desc.ModeDesc.Height != src.monH) {
+      desc.Rotation != DXGI_MODE_ROTATION_IDENTITY) {
     // HDR (float) or rotated output: the copy below would not match.
     DebugTrace(L"Duplication of %ls unsupported (fmt=%d rot=%d), using GDI",
                src.device.c_str(), (int)desc.ModeDesc.Format,
                (int)desc.Rotation);
     SafeRelease(src.dup);
     src.dupUnsupported = true;
+  } else if ((int)desc.ModeDesc.Width != src.monW ||
+             (int)desc.ModeDesc.Height != src.monH) {
+    // The monitor is changing resolution (a virtual display starting up at
+    // 800x600, say): not a lasting problem, so try again shortly.
+    DebugTrace(L"Duplication of %ls is %ux%u, expected %dx%d: retrying",
+               src.device.c_str(), desc.ModeDesc.Width, desc.ModeDesc.Height,
+               src.monW, src.monH);
+    SafeRelease(src.dup);
+    src.dupRetryAt = GetTickCount64() + kDupRetryMs;
   }
 }
 
@@ -562,6 +579,7 @@ bool InitSource(Source& src, const std::wstring& device, IDXGIOutput1* output) {
   src.monH = src.monRect.bottom - src.monRect.top;
   src.dupUnsupported = output == nullptr;
   src.dupRetryAt = 0;
+  src.dupLastError = S_OK;
   src.gdiNextAt = 0;
   if (src.monW <= 0 || src.monH <= 0) return false;
 
@@ -941,6 +959,13 @@ void RenderFrame() {
     r.seenGeneration = s.generation;
     snap = true;
     if (s.device != r.main.device || !r.main.content) {
+      // Windows lets a process capture a monitor only once: if the PiP has
+      // the monitor now wanted in the main view, let it go first, or the main
+      // view falls back to slow GDI capture. The PiP is set up again below.
+      if (!r.pip.device.empty() && r.pip.device == s.device) {
+        ReleaseSource(r.pip);
+        r.pip.device.clear();
+      }
       if (!SetupSource(s.device)) {
         // Try again shortly (the display may still be settling).
         r.seenGeneration = ~0u;
@@ -955,7 +980,11 @@ void RenderFrame() {
     return;
   }
 
-  if (s.pipDevice != r.pip.device) SetupPip(s.pipDevice);
+  // The app may still name the main view's monitor for the PiP for a frame
+  // or two after a switch. Capturing it twice fails, so wait for the update.
+  const std::wstring wantPip =
+      s.pipDevice == r.main.device ? std::wstring() : s.pipDevice;
+  if (wantPip != r.pip.device) SetupPip(wantPip);
   Capture(r.main);
   Capture(r.pip);
 

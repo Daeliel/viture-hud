@@ -1322,10 +1322,17 @@ void DrawPrivacy(const State& s) {
   const int standInCount =
       (int)std::fmin((float)s.standIns.size(), (float)kMaxStandIns);
   const std::wstring setup =
-      L"No spare display found. Install a virtual display driver (for "
-      L"example Virtual Display Driver), give it the same resolution as the "
-      L"screen it stands in for, then choose “Disconnect this display” for "
-      L"it in Settings > Display. It shows up here.";
+      s.virtualScreensInUse > 0
+          ? std::wstring(
+                L"No spare display found. Your virtual display is in use as a "
+                L"screen, and a stand-in has to be a spare one. Choose "
+                L"“Disconnect this display” for it in Settings > Display to "
+                L"use it here, or add another virtual display.")
+          : std::wstring(
+                L"No spare display found. Install a virtual display driver (for "
+                L"example Virtual Display Driver), give it the same resolution "
+                L"as the screen it stands in for, then choose “Disconnect this "
+                L"display” for it in Settings > Display. It shows up here.");
 
   const float introH = DrawWrapped(intro, g_fWrapBody, 0, 0, textW, kText, false);
   const float helpH = DrawWrapped(help, g_fWrap, 0, 0, textW, kMuted, false);

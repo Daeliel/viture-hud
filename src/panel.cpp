@@ -36,7 +36,7 @@ constexpr float kRowH = 56;
 constexpr float kControlW = 300;
 
 // Shown in the About card. Keep the version in step with res/icon.rc.
-constexpr wchar_t kVersion[] = L"1.1.0";
+constexpr wchar_t kVersion[] = L"1.1.1";
 constexpr wchar_t kRepoUrl[] = L"https://github.com/Daeliel/viture-hud";
 
 constexpr UINT_PTR kTimerRepaint = 1;
